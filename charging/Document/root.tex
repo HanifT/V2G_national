@@ -1,0 +1,250 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[letterpaper, margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{mathptmx}
+\usepackage{float}
+\usepackage[cmex10]{amsmath}
+\usepackage{amsthm,amssymb}
+\usepackage{url}
+\urlstyle{same} 
+\def\UrlBreaks{\do\/\do-}
+\usepackage{breakurl}
+\usepackage{fancybox}
+\usepackage{breqn}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{comment}
+\usepackage[english]{babel}
+\usepackage[acronym,nomain]{glossaries} % list of acronyms
+\usepackage{xurl}
+\usepackage{cite} % math and engineering style citations
+\usepackage{multicol}
+\usepackage{multirow}
+\usepackage{mathptmx}
+\usepackage{float}
+\usepackage{lipsum}
+\usepackage{framed}
+\usepackage[T1]{fontenc}
+\usepackage[pdfpagelabels,pdfusetitle,colorlinks=false,pdfborder={0 0 0}]{hyperref}
+
+\renewcommand{\arraystretch}{1.2}
+
+\sloppy
+
+\newcolumntype{C}[1]{>{\centering\let\newline\\\arraybackslash\hspace{0pt}}m{#1-2\tabcolsep}}
+
+\title{Time-Varying Optimal Control for Dynamic Systems using Mixed Integer Linear Programming: The Electric Vehicle Charge Scheduling Problem}
+\author{Aaron Rabinowitz}
+\date{}
+
+\input{gloss}
+\makeglossaries
+
+\begin{document}
+
+\maketitle
+
+\section*{Introduction}
+
+This document outlines how to formulate and solve a time-varying optimal controls problem as a \gls{lp}. A \gls{lp} is defined by a linear objective function (in which all terms are linear) and may be bounded and constrained in a non-algebraic manner. A wide variety of solvers are available to solve bounded \glspl{lp} with these solvers varying in numerical method. most solvers implement either the Simplex method or an Interior Point method. The Simplex method is an efficient method which searches for optimal solutions among the extrema and along the boundaries of the feasible region defined by the problem bounds. Interior Point methods start at a given point within the feasible region and perform a gradient descent search for optima. There are also many ways to call the various solvers in various programming languages. Posing an optimization as a \gls{lp} is useful as it allows for use of the mentioned robust computational infrastructure (Some of the solver methods used for \glspl{lp} can also be used to solve \glspl{qp}). In this document and accompanying code repository, examples are given which show how a rather complex optimization problem can be relatively easily solved when posed as a \gls{lp}.
+
+\subsection*{Direct Transcription into the Time Domain}
+
+\gls{lp} and \gls{qp} solvers can only solve a very specific type of problem. The defining features of such a problem are linearly independent decision variables and constraints as linear functions of those design variables. Solving time-varying controls problems with \gls{lp} and \gls{qp} solvers requires one to pose the problem in a manner that it can be solved as a \gls{lp} or \gls{qp}.
+
+Posing a time-varying optimal controls problem as a \gls{lp} or \gls{qp} requires transcription into the time domain. Rather than treating the controls as $N$ time-varying controls ($u=f(t)$), the controls are treated as $N$ sets of $M$ independent variables corresponding to $M$ time-steps ($u=\{u_0,u_1,\dots,u_M\}$). This process, called Direct Transcription, is necessary to pose the problem as a \gls{lp}. The objective function for  continuous and discreet optimization problems are shown in Equations \eqref{eq:exc} and \eqref{eq:exd} respectively.
+
+\begin{equation}
+	\min_{u\in U}\quad \int_{t_0}^{t_m}u(t)dt: u=f(t) \label{eq:exc}
+\end{equation}
+
+\begin{equation}
+	\min_{u\in U}\quad \sum_{k=0}^{M} u_k: u=\{f_0,f_1,\dots,f_M\} \label{eq:exd}
+\end{equation}
+
+Once transcribed, the controls at each time-step are independent on one-another which, often, does not represent reality. As an example, one might seek to control the acceleration of a vehicle in order to minimize energy consumption over a given time period. The rate at which the vehicle can change accelerations may be limited physically or by passenger comfort considerations. In this case the relationships between values of the control at different time-steps will have to be enforced by constraints. A possible constraint could be that acceleration at time step $k$ has to be within a certain range centered on acceleration at time-step $k-1$. Adding this constraint will necessitate defining an initial condition which will have influence over the ultimate solution. Such a constraint may take the form
+
+\begin{equation}
+	a_{k}-a_{k-1}\leq C \quad k=1,2,\dots,M
+\end{equation}
+
+where $C$ is a constant. For the case $k=0$ another constraint will have to be made where $a_{k-1}$ is the inputted constant for initial acceleration. One may also desire to keep track of a problem state which is not a decision variable. For example, in the case of the vehicle mentioned previously, the vehicle may be subject to maximum and minimum speeds. Speed is related to acceleration by the kinematic equation 
+
+
+\begin{equation}
+	v(t)=v(0)+\int_{t_0}^{t_m}a(t)dt \quad \forall m\in \{0,1,\dots,M\}
+\end{equation}
+
+where $v$ is velocity and $a$ is acceleration. After transcription, the kinematic equation becomes
+
+\begin{equation}
+	v_m=v_0+\sum_{k=0}^{m}a_k\delta t_k \quad \forall m\in \{0,1,\dots,M\}\label{eq:vel_d}
+\end{equation}
+
+where $\delta t_k$ is the duration of the  $k^{th}$ time-step. Since Equation \eqref{eq:vel_d} is valid for every possible value of $m$, the value of velocity for each time-step can be found using Equation \eqref{eq:vel_mat}.
+
+\begin{equation}
+	\begin{bmatrix}
+		v_0 \\ v_1 \\ \vdots \\ v_M
+	\end{bmatrix}=
+	\begin{bmatrix}
+		\delta t_0 & \delta t_1 & \dots & \delta t_M
+	\end{bmatrix}
+	\begin{bmatrix}
+		1 & 0 & \dots & 0\\
+		1 & 1 & \dots & 0\\
+		\vdots & \vdots &\ddots & \\
+		1 & 1 & & 1
+	\end{bmatrix}
+	\begin{bmatrix}
+		a_0 \\ a_1 \\ \vdots \\ a_M
+	\end{bmatrix}
+	\label{eq:vel_mat}
+\end{equation}
+
+Assuming that $a$ is a continuous variable there will be an uncountable infinity of possible combinations of values for the $a$ vector. In all scenarios there will be a corresponding vector of values for the $v$ vector. As can be seen in Equation \eqref{eq:vel_mat}, the relationship between acceleration and velocity is linear and thus, velocity can be a basis for constraints without ever being explicitly defined in the problem.
+
+Another type of non-linearity which may be inherent to an optimization problem is on-off dynamics. As an example, an internal combustion engine requires a certain amount of compression in order to begin the combustion process after which it can operate. There is a band of engine speeds in which the engine can operate below which the power produced by the engine will be too little to compress the air sufficiently for combustion and the engine will stall. Thus there is a discontinuity between 0 and the minimum functional velocity $v^{min}$. The engine will also have a maximum operational velocity of $v^{max}$ In order to model this in a linear manner an \textit{integer} variable will have to be introduced. Integer variables are variables that the solver must keep as integer valued (solvers do this using various methods including branching-and-cutting all of which can seriously increase solver-time). In this case the integer variable will be $e^{on}$ for engine on.
+The allowable values for $e^{on}$ will be 0 and 1 ($e^{on}\in\mathbb{B}$). The on-off constraints can be written as
+
+\begin{gather}
+	e_k^{on}v^{min}-v_k\leq 0 \quad e^{on}\in \mathbb{B} \quad \forall k\in \{0,1,\dots,M\}\label{eq:onoff1}\\
+	e_k^{on}v^{max}-v_k\geq 0 \quad e^{on}\in \mathbb{B} \quad \forall k\in \{0,1,\dots,M\}\label{eq:onoff2}
+\end{gather}
+
+which forces $v_k=0$ when $e_k^{on}=0$ and $v^{min}\leq v_k\leq v^{max}$ when $e_k^{on}=1$. The previously presented constraint adds one integer variable and thus will increase solver time and should only be included if the discontinuity at 0 is important to results. The on-off constraint may also be insufficient in certain cases where a significant cost is paid in order to change the on-off state. An internal combustion engine requires electric power to run the starter motor to start the engine. When programming a feature such as idle-stop it might be critical to factor this dynamic in. Adding startup and/or shutdown costs for the engine requires two integer variables $e^{startup}$ and $e^{shutdown}$. In this case the on-off state of the engine in the on-off constraint will be a non-explicit state (see Equation \eqref{eq:vel_mat}) and the startup and shutdown costs can be added to the objective function. Opting for startup-shutdown over on-off will increase solver-time.
+
+Finally, one may want to account for nonlinear costs and/or rewards. Continuing with the engine example, internal combustion engines have nonlinear torque curves. The torque curve can be linearized by creating $L$ bounded linear functions representing different regions of the torque curve. As $L$ approaches $\inf$ the linearized functions approach the original nonlinear function. What is needed is a constraint to select the correct linear function based on engine speed to the exclusion of all others. This can be accomplished with a series of on-off constraints (as in Equations \eqref{eq:onoff1} and \eqref{eq:onoff2})for each interval which must collectively sum to 1. With the correct interval selected and all others set to zero the engine torque can be computed as
+
+\begin{equation}
+	\eta_k=\sum_{i\in I}[s_im_iv_k+s_ib_i]\quad s\in\mathbb{Z}
+\end{equation}
+
+where $\eta$ is engine torque, $i$ is the interval, $s$ is the integer multiplier for interval selection, $\mathbb{Z}$ is a set containing all positive integers, $m$ is the slope of the linear function on interval $i$, and $b$ is the intercept of the linear function on interval $i$. It is worth noting, as before, that adding interval constraints adds integer variables, one per interval, which will increase solver-time.
+
+\section*{The \gls{evcsp}}
+
+The objective of the \gls{evcsp} is to find a charging schedule over a defined time period which minimizes inconvenience for the vehicle user. The vehicle user has a pre-defined itinerary which is exogenous to the problem of $N$ trips each of which is followed by a dwell of known duration. Each trip depletes the vehicle's stored energy. In order to recoup energy, the vehicle must charge. Chargers are available for a subset of dwell or an ad-hoc diversion to a charger can be made during a trip. If a charger is available at the user's home location or work location then charging will not represent any inconvenience because the charge event will take place during a time when the car would be dwelled at the location in any event. If a charger is available while the vehicle is dwelled at a non-home and non-work location then a small amount of inconvenience will be experienced paying for the charge event. Ad-hoc diversions to chargers cause inconvenience for the duration of additional travel, the duration of payment, and the duration of the charge event. An ad-hoc diversion to a charger is an option for every trip. The vehicle's \gls{soc} must be maintained in a given range at all times throughout the itinerary and must meet or exceed a given value at the end of the itinerary.
+
+The objective function for the \gls{evcsp} is
+
+\begin{equation}
+	\min_{u\in U}\quad \sum_{e\in E}[u_e^{db}c_e^{db}+u_e^{ab}c^{ab}+u_e^{ad}c^{ad}] \label{eq:obj}
+\end{equation}
+
+where $E$ is the set of itinerary events (trip then dwell), $U=[u^{dd},u^{db},u^{ad},u^{ab}]$ is the set of decision variables including, in order, dwell charge event duration, dwell charge event boolean, ad-hoc charge event duration, ad-hoc charge event boolean, and  $C=[c^{dd},c^{db},c^{ad},c^{ab}]$ is the set of constant cost multipliers corresponding to $U$. The variables of the \gls{evcsp} are bounded as follows
+
+\begin{equation}
+	\begin{array}{ccc}
+		\multicolumn{3}{c}{lb^{dd}u_{e}^{db}-u_{e}^{dd}\leq 0}\\
+		\multicolumn{3}{c}{ub^{dd}u_{e}^{db}-u_{e}^{dd}\geq 0}\\
+		\multicolumn{3}{c}{lb^{ad}u^{ab}-u_{e}^{ad}\leq 0}\\
+		\multicolumn{3}{c}{ub^{ad}u^{ab}-u_{e}^{ad}\geq 0}\\
+		& s.t. & \\
+		u^{db}, u^{ab}\in\mathbb{B} && \forall e\in E\\
+	\end{array}
+\end{equation}
+
+The \gls{evcsp} is subject to several constraints which serve the purpose of maintaining the vehicle's \gls{soc} within allowed limits and returning the vehicle's \gls{soc} to a given final value. these constraints are
+
+\begin{equation}
+	s_i+\sum_{k=0}^{K}[u_{e_k}^{dd}r_{e_k}^{d}+u_{e_k}^{ad}r_{e_k}^{a}-d_{e_k}]\geq s_{lb}\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i+\sum_{k=0}^{K}[u_{e_k}^{dd}r_{e_k}^{d}+u_{e_k}^{ad}r_{e_k}^{a}-d_{e_k}]\leq s_{ub}\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i+\sum_{e\in E}[u_{e}^{dd}r_{e}^{d}+u_{e}^{ad}r_{e}^{a}-d_{e}]=s_f
+\end{equation}
+
+where $s_i$ is the initial vehicle charge level, $s_f$ is the final vehicle charge level, $s_{lb}$ is the lower bound for vehicle charge level, $s_{ub}$ is the upper bound for vehicle charge level, $r^d$ and $r^a$ are the dwell and ad-hoc charging rates respectively available for each event, and $D=\{d_0,d_1,\dots,d_n\}$ is the set of discharges corresponding to the events in $E$.
+
+\section*{The \gls{sevcsp}}
+
+The \gls{sevcsp} differs from the \gls{evcsp} in the extent of the \gls{bev} user's knowledge of charger availability. Although the user knows where chargers are available, the user does not know \textit{when} chargers will be available. For example, a user may live in a multi-unit dwelling with fewer chargers than parking spots. The user will have to consider multiple scenarios of charger availability when planning a charging schedule. In this case the decision to ad-hoc charge is a general variable; all others are specific variables.
+
+The objective function for the \gls{evcsp} is
+
+\begin{equation}
+	\min_{u\in U}\quad \sum_{\phi\in \Phi}\sum_{e\in E}[u_{\phi,e}^{db}c_{e}^{db}+u_{e}^{ab}c^{ab}+u_{\phi,e}^{ad}c^{ad}] \label{eq:obj_s}
+\end{equation}
+
+where $\Phi$ is the set of scenarios, $E$ is the set of itinerary events (trip then dwell), $U=[u^{dd},u^{db},u^{ad},u^{ab}]$ is the set of decision variables including, in order, dwell charge event duration, dwell charge event boolean, ad-hoc charge event duration, ad-hoc charge event boolean, and  $C=[c^{dd},c^{db},c^{ad},c^{ab}]$ is the set of constant cost multipliers corresponding to $U$. The variables of the \gls{evcsp} are bounded as follows
+
+\begin{equation}
+	\begin{array}{ccc}
+		\multicolumn{3}{c}{lb^{dd}u_{\phi,e}^{db}-u_{\phi,e}^{dd}\leq 0}\\
+		\multicolumn{3}{c}{ub^{dd}u_{\phi,e}^{db}-u_{\phi,e}^{dd}\geq 0}\\
+		\multicolumn{3}{c}{lb^{ad}u^{ab}-u_{\phi,e}^{ad}\leq 0}\\
+		\multicolumn{3}{c}{ub^{ad}u^{ab}-u_{\phi,e}^{ad}\geq 0}\\
+		& s.t. & \\
+		u^{db}, u^{ab}\in\mathbb{B} & \forall \phi\in \Phi,& \forall e\in E\\
+	\end{array}
+\end{equation}
+
+The \gls{evcsp} is subject to several constraints which serve the purpose of maintaining the vehicle's \gls{soc} within allowed limits and returning the vehicle's \gls{soc} to a given final value. these constraints are
+
+\begin{equation}
+	s_i+\sum_{k=0}^{K}[u_{\phi,e_k}^{dd}r_{e_k}^{d}+u_{\phi,e_k}^{ad}r_{e_k}^{a}-d_{e_k}]\geq s_{lb}\quad \forall \phi\in \Phi\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i+\sum_{k=0}^{K}[u_{\phi,e_k}^{dd}r_{e_k}^{d}+u_{\phi,e_k}^{ad}r_{e_k}^{a}-d_{e_k}]\leq s_{ub}\quad \forall \phi\in \Phi\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i+\sum_{e\in E}[u_{\phi,e}^{dd}r_{e}^{d}+u_{\phi,e}^{ad}r_{e}^{a}-d_{e}]=s_f\quad \forall \phi\in \Phi
+\end{equation}
+
+where $s_i$ is the initial vehicle charge level, $s_f$ is the final vehicle charge level, $s_{lb}$ is the lower bound for vehicle charge level, $s_{ub}$ is the upper bound for vehicle charge level, $r^d$ and $r^a$ are the dwell and ad-hoc charging rates respectively available for each event, and $D=\{d_0,d_1,\dots,d_n\}$ is the set of discharges corresponding to the events in $E$.
+
+\section*{The \gls{phevcsp}}
+
+\glspl{phev} differ from \glspl{bev} in the manner in which they are operated. \gls{phev} are intended to be charged during long dwells and then operate in charge-depleting mode until their \gls{aer} is exhausted. Following exhaustion of a \gls{phev}'s \gls{aer}, the \gls{phev} will be operated in charge-sustaining mode. If charge-sustaining range is exhausted, \gls{phev} drivers are expected to opt to refuel their vehicle. This operational doctrine is manifested in \gls{phev} design where most \glspl{phev} have relatively low battery capacities and no ability to DC charge.
+
+Considering the optimal charge scheduling of a \gls{phev} for a given itinerary, the optimization problem is a 2-state, 2-control problem. The problem states are the vehicle's \gls{soc} and \gls{sof}. The problem controls are dwell charging and en-route refueling which is treated as a "charge" for the purposes of the optimization.
+
+The objective function for the \gls{phevcsp} is
+
+\begin{equation}
+	\min_{u\in U}\quad \sum_{e\in E}[u_e^{db}c_e^{db}+u_e^{ab}c^{ab}+u_e^{ad}c^{ad}] \label{eq:obj_phev}
+\end{equation}
+
+where $E$ is the set of itinerary events (trip then dwell), $U=[u^{dd},u^{db},u^{ad},u^{ab}]$ is the set of decision variables including, in order, dwell charge event duration, dwell charge event boolean, ad-hoc fueling event duration, ad-hoc fueling event boolean, and  $C=[c^{dd},c^{db},c^{ad},c^{ab}]$ is the set of constant cost multipliers corresponding to $U$. The variables of the \gls{evcsp} are bounded as follows
+
+\begin{equation}
+	\begin{array}{ccc}
+		\multicolumn{3}{c}{lb^{dd}u_{e}^{db}-u_{e}^{dd}\leq 0}\\
+		\multicolumn{3}{c}{ub^{dd}u_{e}^{db}-u_{e}^{dd}\geq 0}\\
+		\multicolumn{3}{c}{lb^{ad}u^{ab}-u_{e}^{ad}\leq 0}\\
+		\multicolumn{3}{c}{ub^{ad}u^{ab}-u_{e}^{ad}\geq 0}\\
+		& s.t. & \\
+		u^{db}, u^{ab}\in\mathbb{B} && \forall e\in E\\
+	\end{array}
+\end{equation}
+
+The \gls{evcsp} is subject to several constraints which serve the purpose of maintaining the vehicle's \gls{soc} and \gls{sof} within allowed limits and returning the vehicle's \gls{soc} and \gls{sof} to a given set of final values. these constraints are
+
+\begin{equation}
+	s_i^c+\sum_{k=0}^{K}[u_{e_k}^{dd}r_{e_k}^{d}-d_{e_k}^{cd}]\geq s_{lb}^c\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i^c+\sum_{k=0}^{K}[u_{e_k}^{dd}r_{e_k}^{d}-d_{e_k}^{cd}]\leq s_{ub}^c\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i^c+\sum_{e\in E}[u_{e}^{dd}r_{e}^{d}-d_{e}^{cd}]=s_f^c
+\end{equation}
+
+\begin{equation}
+	s_i^t+\sum_{k=0}^{K}[u_{e_k}^{ad}r_{e_k}^{a}-d_{e_k}^{cs}]\geq s_{lb}^t\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i^t+\sum_{k=0}^{K}[u_{e_k}^{ad}r_{e_k}^{a}-d_{e_k}^{cs}]\leq s_{ub}^t\quad \forall K\in E
+\end{equation}
+\begin{equation}
+	s_i^t+\sum_{e\in E}[u_{e}^{ad}r_{e}^{a}-d_{e}^{cs}]=s_f^t
+\end{equation}
+
+where $s_i^c$ is the initial vehicle charge level, $s_f^c$ is the final vehicle charge level, $s_i^a$ is the initial vehicle fuel level, $s_f^t$ is the final vehicle fuel level, $s_{lb}^c$ is the lower bound for vehicle charge level, $s_{ub}^c$ is the upper bound for vehicle charge level, $s_{lb}^t$ is the lower bound for vehicle fuel level, $s_{ub}^t$ is the upper bound for vehicle fuel level, $r^d$ and $r^a$ are the dwell charging and fueling energy addition rates respectively available for each event, $D^{cd}=\{d_0^{cd},d_1^{cd},\dots,d_n^{cd}\}$ is the set of discharges corresponding to the events in $E$, and $D^{cs}=\{d_0^{cs},d_1^{cs},\dots,d_n^{cs}\}$ is the set of fuel burns corresponding to the events in $E$. It is assumed that all charge-depleting range will be used before any charge-sustaining operation. The lower bound for charge-depleting operation as a function of \gls{soc} is stored in the variable $lb^{cd}$.
+
+\end{document}

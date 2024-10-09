@@ -1,0 +1,62 @@
+This is BibTeX, Version 0.99d
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: root.aux
+Reallocating 'name_of_file' (item size: 1) to 7 items.
+The style file: ieeetr.bst
+Reallocating 'name_of_file' (item size: 1) to 8 items.
+Database file #1: sources.bib
+Repeated entry---line 381 of file sources.bib
+ : @article{rabinowitz_IEEE_Access_2023
+ :                                     ,
+I'm skipping whatever remains of this entry
+Repeated entry---line 987 of file sources.bib
+ : @article{Wang_2017
+ :                   ,
+I'm skipping whatever remains of this entry
+Warning--empty author in whitehouse_2021
+Warning--empty author in european_commission_2020
+Warning--there's a number but no series in Hart_2017
+Warning--empty institution in KBB_2023
+Warning--empty institution in Nicholas_2013
+You've used 50 entries,
+            1876 wiz_defined-function locations,
+            795 strings with 14255 characters,
+and the built_in function-call counts, 13109 in all, are:
+= -- 1279
+> -- 584
+< -- 1
++ -- 216
+- -- 166
+* -- 917
+:= -- 1868
+add.period$ -- 66
+call.type$ -- 50
+change.case$ -- 53
+chr.to.int$ -- 0
+cite$ -- 55
+duplicate$ -- 675
+empty$ -- 1154
+format.name$ -- 166
+if$ -- 3243
+int.to.chr$ -- 0
+int.to.str$ -- 50
+missing$ -- 40
+newline$ -- 169
+num.names$ -- 44
+pop$ -- 139
+preamble$ -- 1
+purify$ -- 0
+quote$ -- 0
+skip$ -- 516
+stack$ -- 0
+substring$ -- 692
+swap$ -- 318
+text.length$ -- 1
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 0
+warning$ -- 5
+while$ -- 95
+width$ -- 52
+write$ -- 494
+(There were 2 error messages)
