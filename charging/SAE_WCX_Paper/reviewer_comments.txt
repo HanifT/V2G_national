@@ -1,0 +1,37 @@
+The authors would like to sincerely thank the reviewers for their helpful and insightful comments. These comments have been addressed in the revised manuscript which, thanks to the efforts of the reviewers, is a better and more readable paper.
+
+Reviewer 1:
+
+1. When contemplating a 120 kW DC charging scenario, it is not advisable to utilize the linearized version of the model. The charging curve for most electric vehicles is challenging to linearize.
+
+Thank you for this comment. It is the authors' understanding that DC charge events can be linearized below about 80% SOC. Charge event duration limits were adjusted to keep in this range. Please see the clarifying sentence added to the second-to-last paragraph on page 4.
+
+2. The dwell charging event duration is not included in equations (2) and (7). Please provide an explanation for this omission.
+
+Thank you for this comment. The reason for this is that the goal is to minimize time whichis not already accounted for in the driver's itinerary. A central assumption is that dwell charge events are not inconvenient becuse they do not require deviations from the driver's itinerary. Because dwell events are assumed to not cost the driver time out-of-itinerary they only contribute to inconveninece for the duration of time required to plug in and pay. As an example, charging at home for 10 hours is not any more inconvenient than charging at home for 2 hours if you were going to be at home for 10 hours in any event. This is the dynamic that underpins the preference for home and work charge events. Please see the clarifying sentences added in the paragraph below Equation (2) which also address the following comment.
+
+3. How to establish constant cost multipliers (C) during the optimization process to achieve desired results?
+
+Thank you for this comment. Please see the clarifying sentences added in the paragraph below Equation (2) which also address the previous comment.
+
+4. Please ensure clear differentiation between headings and the main body of the text.
+
+Thank you for this comment. Please note that the manuscript is formatted using the recommended SAE LaTeX template. This template generates the section and subsection headings in a manner different than the current SAE WCX Word template. However, final publication will involve the contents being scanned and reformatted into the official SAE WCX paper format and the final paper will look no different than those prepared in Word. This process has been used by the authors in previous years to good effect.
+
+Reviewer 2:
+
+Page 2 typo "fo MUDs"  should read "for MUDs"
+
+Thank you for this comment, please see the corrected typo on page 2.
+
+Page 3 improper use of word "priori"
+
+Thank you you for this comment, please see the reworked sentence on page 3.
+
+Page 3 "lb" and "ub" not defined.  U has subsets of lower-case u.  lb and ub are upper and lower bounds.  Use of two different lower-case u.
+
+Thank you for this comment, please see the reworked formulations on pages 3 and 4.
+
+some the acronyms were hard to follow.
+
+Thank you for this comment, some acronyms have been substituted for long versions throughout the paper and clarification has been provided for some others.
