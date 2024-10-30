@@ -6,143 +6,121 @@ import pickle as pkl
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+# %%
 
 
-def DriverTrips(itineraries):
+def MakeItineraries():
 
-	for itinerary in tqdm(itineraries):
+	# loading in data
+	t0 = time.time()
+	print('Loading NHTS data:', end='')
+	trips = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/NHTS_2017/trippub.csv')
+	dmv = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/dmv.csv')
+	trips = trips.drop([
+		"TRPACCMP", "TRPHHACC", 'TRWAITTM', 'NUMTRANS', 'TRACCTM', 'DROP_PRK', 'TREGRTM', 'WHODROVE',
+		'HHMEMDRV', 'HH_ONTD', 'NONHHCNT', 'NUMONTRP', 'PSGR_FLG', 'DRVR_FLG', 'ONTD_P1', 'ONTD_P2', 'ONTD_P3',
+		'ONTD_P4', 'ONTD_P5', 'ONTD_P6', 'ONTD_P7', 'ONTD_P8', 'ONTD_P9', 'ONTD_P10', 'ONTD_P11', 'ONTD_P12',
+		'ONTD_P13', 'TRACC_WLK', 'TRACC_POV', 'TRACC_BUS', 'TRACC_CRL', 'TRACC_SUB', 'TRACC_OTH', 'TREGR_WLK',
+		'TREGR_POV', 'TREGR_BUS', 'TREGR_CRL', 'TREGR_SUB', 'TREGR_OTH', 'DRVRCNT', 'NUMADLT', 'WRKCOUNT',
+		'HHRESP', 'LIF_CYC', 'MSACAT', 'MSASIZE', 'RAIL', 'HH_RACE', 'HH_HISP', 'HH_CBSA', 'SMPLSRCE', 'R_AGE',
+		'EDUC', 'R_SEX', 'PRMACT', 'PROXY', 'WORKER', 'DRIVER', 'WTTRDFIN', 'WHYTRP90', 'TRPMILAD', 'R_AGE_IMP',
+		'R_SEX_IMP', 'OBHUR', 'DBHUR', 'OTHTNRNT', 'OTPPOPDN', 'OTRESDN', 'OTEEMPDN', 'OBHTNRNT', 'OBPPOPDN',
+		'OBRESDN', 'DTHTNRNT', 'DTPPOPDN', 'DTRESDN', 'DTEEMPDN', 'DBHTNRNT', 'DBPPOPDN', 'DBRESDN'
+	], axis=1)
+	trip_veh = [1, 2, 3, 4, 5, 6]
+	veh_type = [-1, 1, 2, 3, 4, 5]
+	trips = trips[trips["TRPTRANS"].isin(trip_veh)]
+	trips = trips[trips["TRPMILES"] > 0]
+	trips = trips[trips["TRVLCMIN"] > 0]
+	trips = trips[trips["VEHTYPE"].isin(veh_type)]
+	trips = trips[trips["TRPMILES"] < 500]
 
-		itinerary['trips']=itinerary['trips'][(
-			itinerary['trips']['PERSONID']==itinerary['trips']['WHODROVE'])].copy()
+	# Step 1: Separate weekday trips (TRAVDAY between 2 and 6) and weekend trips (TRAVDAY is 1 or 7)
+	weekday_trips = trips[(trips['TRAVDAY'] >= 2) & (trips['TRAVDAY'] <= 6)].copy()
+	weekend_trips = trips[(trips['TRAVDAY'] == 1) | (trips['TRAVDAY'] == 7)].copy()
 
-	return itineraries
+	# Step 2: Replicate each weekday trip for each weekday (Monday to Friday)
+	expanded_trips = pd.concat([weekday_trips] * 5, ignore_index=True)
 
-def SelectCommuters(itineraries):
+	# Step 3: Update the TRAVDAY values for expanded trips to cycle through Monday to Friday (2 to 6)
+	expanded_trips['TRAVDAY'] = (expanded_trips.index % 5) + 2
 
-	keep=[False]*len(itineraries)
+	# Step 4: Combine the expanded weekday trips with the unchanged weekend trips
+	new_itineraries = pd.concat([expanded_trips, weekend_trips], ignore_index=True)
 
-	for idx in tqdm(range(len(itineraries))):
+	# Step 5: Sort by HOUSEID, PERSONID, VEHID, and TRAVDAY to organize the final DataFrame
+	new_itineraries = new_itineraries.sort_values(by=['HOUSEID', 'PERSONID', 'VEHID', 'TRAVDAY', "TDTRPNUM"]).reset_index(drop=True)
+	# Group by HHSTATE and count unique combinations of HOUSEID, PERSONID, and VEHID for each state
 
-		keep[idx]=np.any(itineraries[idx]['trips']['WHYTO']==3)
-
-	return itineraries[keep]
-
-def SelectMUD(itineraries):
-
-	keep=[False]*len(itineraries)
-
-	for idx in tqdm(range(len(itineraries))):
-
-		df=itineraries[idx]['trips'][itineraries[idx]['trips']['WHYFROM']==1]
-		# print(df)
-
-		keep[idx]=(np.any(df['DTRESDN']>=7000)&np.any(df['DBHTNRNT']>=70))
-
-	return itineraries[keep]
-
-def MakeItineraries(
-	vehicles_file='../Data/NHTS_2017/vehpub.csv',
-	trips_file='../Data/NHTS_2017/trippub.csv',
-	out_file='../Data/Generated_Data/itineraries.pkl',
-	n_households=0,
-	disp_freq=10
-	):
-
-	#loading in data
-	t0=time.time()
-	print('Loading NHTS data:',end='')
-	vehicles=pd.read_csv(vehicles_file)
-	trips=pd.read_csv(trips_file)
 	print(' {:.4f} seconds'.format(time.time()-t0))
 
-	t0=time.time()
-	print('Creating itinerary dicts:',end='')
+	t0 = time.time()
+	print('Creating itinerary dicts:', end='')
 
-	#Selecting for household vehicles
-	trips=trips[(
-		(trips['TRPHHVEH']==1)&
-		(trips['TRPTRANS']>=3)&
-		(trips['TRPTRANS']<=6)&
-		(trips['VEHID']<=2)
+	# Selecting for household vehicles
+	new_itineraries = new_itineraries[(
+		(new_itineraries['TRPHHVEH'] == 1) &
+		(new_itineraries['TRPTRANS'] >= 3) &
+		(new_itineraries['TRPTRANS'] <= 6)
 		)].copy()
 
-	#all unique vehicles
-	hh_ids=trips['HOUSEID'].copy().to_numpy()
-	veh_ids=trips['VEHID'].copy().to_numpy()
+	# Get unique combinations of household, vehicle, and person IDs
+	unique_combinations = new_itineraries[['HOUSEID', 'VEHID', 'PERSONID']].drop_duplicates()
 
-	#optionally down-selecting data to n random households
-	if n_households:
-		unique_hh,unique_hh_inverse=np.unique(hh_ids,return_inverse=True)
-		
-		hh_keep=np.random.choice(unique_hh,n_households,replace=False)
-		idx_keep=np.isin(hh_ids,hh_keep)
-		hh_ids=hh_ids[idx_keep]
-		veh_ids=veh_ids[idx_keep]
+	# Start timer
+	t0 = time.time()
 
-	# print(hh_keep)
+	# Initialize an array to store each itinerary dictionary
+	itineraries = np.array([None] * unique_combinations.shape[0])
 
-	itineraries=np.array([None]*hh_ids.shape[0])
+	# Main loop: iterate over each unique household-vehicle-person combination in the test set
+	for idx, row in tqdm(enumerate(unique_combinations.itertuples(index=False))):
+		hh_id = row.HOUSEID
+		veh_id = row.VEHID
+		person_id = row.PERSONID
 
-	#Main loop
-	for idx in tqdm(range(hh_ids.shape[0])):
-		hh_id=hh_ids[idx]
-		veh_id=veh_ids[idx]
-		trips_indices=np.argwhere(
-			(trips['HOUSEID']==hh_id)&(trips['VEHID']==veh_id)).flatten()
-		itineraries[idx]=({
-			'trips':trips.iloc[trips_indices]
-			})
+		# Get trips for this specific household-vehicle-person combination
+		trips_indices = np.argwhere(
+			(new_itineraries['HOUSEID'] == hh_id) &
+			(new_itineraries['VEHID'] == veh_id) &
+			(new_itineraries['PERSONID'] == person_id)
+		).flatten()
 
-	print(' {:.4f} seconds'.format(time.time()-t0))
+		# Create the dictionary for the current household-vehicle-person combination
+		itinerary_dict = {
+			'trips': new_itineraries.iloc[trips_indices]
+		}
 
-	t0=time.time()
-	print('Pickling outputs:',end='')
-	pkl.dump(itineraries,open(out_file,'wb'))
-	print(' {:.4f} seconds'.format(time.time()-t0))
+		# Store in the array at the current index
+		itineraries[idx] = itinerary_dict
 
-class Itinerary():
+	# Display time taken
+	print('Itineraries creation took {:.4f} seconds'.format(time.time() - t0))
 
-	def __init__(self,hh_id,veh_id,veh,trips):
+	# Save itineraries to a pickle file
+	output_file = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries.pkl'
+	t0 = time.time()
+	print('Pickling outputs:', end='')
+	pkl.dump(itineraries, open(output_file, 'wb'))
+	print(' Done in {:.4f} seconds'.format(time.time() - t0))
 
-		self.veh=veh.to_dict(orient='records')[0]
-		self.trips=trips
-
-#Function for importing, cleaning, and processing trips data
-def LoadNHTSData(trips_file):
-	#Loading in the trips data
-	trips_df=pd.read_csv(trips_file)
-	#Filtering out non-vehicle trips
-	trips_df=trips_df[(trips_df['VEHID']>0)&(trips_df['VEHID']<12)]
-	# #Removing unnecessary columns
-	trips_df=trips_df[(['HOUSEID','VEHID','STRTTIME','ENDTIME',
-		'TRVLCMIN','TRPMILES','TRPTRANS','DWELTIME','WHYTRP1S',
-		'OBHUR','HHSTFIPS','HH_CBSA','DTRESDN','DBHTNRNT'])]
-
-	return trips_df
-
-def MakeNHTSItineraries(in_file='../Data/NHTS_2017/trippub.csv',
-	out_file='../Data/Generated_Data/NHTS_Itineraries.pkl'):
-	
-	t0=time.time()
-	print('Loading NHTS data:',end='')
-	NHTS_df=LoadNHTSData(in_file)
-	print(' {:.4f} seconds'.format(time.time()-t0))
-
-	t0=time.time()
-	print('Creating itinerary objects:',end='')
-	NHTS_itineraries=CreateItineraries(NHTS_df)
-	print(' {:.4f} seconds'.format(time.time()-t0))
-
-	t0=time.time()
-	print('Pickling outputs:',end='')
-	pkl.dump(NHTS_itineraries,open(out_file,'wb'))
-	print(' {:.4f} seconds'.format(time.time()-t0))
-
-	print('Done')
-
-if __name__ == "__main__":
-	argv=sys.argv
-	if len(argv)>=2:
-		MakeItineraries(n_households=int(argv[1]))
-	else:
-		MakeItineraries()
+# %%
+# MakeItineraries()
+#
+# # %%
+# # Specify the path to the pickle file
+# input_file = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries.pkl'
+#
+# # Load the pickle file
+# t0 = time.time()
+# print('Loading pickled outputs:', end='')
+# with open(input_file, 'rb') as file:
+#     itineraries = pkl.load(file)
+# print(' Done in {:.4f} seconds'.format(time.time() - t0))
+#
+# # Extract 'trips' DataFrames and concatenate into a single DataFrame
+# trips_df = pd.concat([itinerary['trips'] for itinerary in itineraries if itinerary is not None], ignore_index=True)
+#
+#
+# # Test output: print the first entry in the loaded data
+# print(itineraries[3])  # Adjust index if needed, depending on your data structure
