@@ -1,4 +1,10 @@
-*.pkl
+# Ignore compiled Python files and cache directories
+__pycache__/
+*.pyc
+
+# Ignore macOS system files
 .DS_Store
+
+# Ignore specific unwanted files
 codebook.pdf
 
