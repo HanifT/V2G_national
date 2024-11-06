@@ -47,7 +47,7 @@ class EVCSP():
 		travel_penalty=15*60,
 		dwell_charge_time_penalty=0,
 		ad_hoc_charge_time_penalty=1,
-		tiles=7,
+		tiles=5,
 		rng_seed=0,
 		**kwargs,
 		):
@@ -55,11 +55,6 @@ class EVCSP():
 		#Generating a random seed if none provided
 		if not rng_seed:
 			rng_seed=np.random.randint(1e6)
-
-		#Pulling trips for driver only
-		person=itinerary['PERSONID'].copy().to_numpy()
-		# whodrove=itinerary['WHODROVE'].copy().to_numpy()
-		# itinerary=itinerary[person==whodrove]
 
 		#Cleaning trip and dwell durations
 		durations=itinerary['TRVLCMIN'].copy().to_numpy()
@@ -148,7 +143,9 @@ class EVCSP():
 	def Solve(self,solver_kwargs={}):
 
 		solver=pyomo.SolverFactory(**solver_kwargs)
-		solver.solve(self.model)
+		res = solver.solve(self.model)
+		self.solver_status = res.solver.status
+		self.solver_termination_condition = res.solver.termination_condition
 
 		self.Solution()
 		self.Compute()
@@ -331,7 +328,7 @@ class SEVCSP():
 		travel_penalty=15*60,
 		dwell_charge_time_penalty=0,
 		ad_hoc_charge_time_penalty=1,
-		tiles=7,
+		tiles=5,
 		rng_seed=0,
 		**kwargs,
 		):
@@ -429,7 +426,9 @@ class SEVCSP():
 	def Solve(self,solver_kwargs={}):
 
 		solver=pyomo.SolverFactory(**solver_kwargs)
-		solver.solve(self.model)
+		res = solver.solve(self.model)
+		self.solver_status = res.solver.status
+		self.solver_termination_condition = res.solver.termination_condition
 
 		self.Solution()
 		self.Compute()

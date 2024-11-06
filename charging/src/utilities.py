@@ -2,9 +2,9 @@ import sys
 import time
 import signal
 import numpy as np
-
+import pandas as pd
 from scipy.stats import t
-
+import os
 
 from contextlib import contextmanager
 from scipy.special import comb
@@ -200,3 +200,17 @@ class PBIterator():
 				print('\n')
 
 			raise StopIteration
+
+
+def load_itineraries(weekday=True):
+    # Choose the filename based on the weekday parameter
+    filename = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekday.pkl' if weekday else '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekend.pkl'
+
+    # Check if the file exists and load it
+    if os.path.isfile(filename):
+        itineraries = pd.read_pickle(filename)
+        print(f'Loaded itineraries from {"weekday" if weekday else "weekend"} file.')
+        return itineraries
+    else:
+        print(f'File {filename} does not exist.')
+        return None
