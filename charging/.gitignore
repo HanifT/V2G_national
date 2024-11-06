@@ -1,10 +1,18 @@
-# Ignore compiled Python files and cache directories
+# Ignore data in NHTS_2017 and NHTS_2022
+Data/Generated_Data/
+Data/NHTS_2017/
+Data/NHTS_2022/
+
+# Ignore common file types
+*.pkl
+*.csv
+*.json
+*.xlsx
+
+# Ignore other unwanted files
 __pycache__/
 *.pyc
-
-# Ignore macOS system files
 .DS_Store
-
-# Ignore specific unwanted files
 codebook.pdf
+
 
