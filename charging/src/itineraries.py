@@ -6,14 +6,17 @@ import pickle as pkl
 from tqdm import tqdm
 # %%
 
+def MakeItineraries(day_type="weekday"):
 
-def MakeItineraries(weekday=True):
-
-	# loading in data
+	# Start timer
 	t0 = time.time()
 	print('Loading NHTS data:', end='')
+
+	# Load data
 	trips = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/NHTS_2017/trippub.csv')
 	dmv = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/dmv.csv')
+
+	# Drop unnecessary columns
 	trips = trips.drop([
 		"TRPACCMP", "TRPHHACC", 'TRWAITTM', 'NUMTRANS', 'TRACCTM', 'DROP_PRK', 'TREGRTM', 'WHODROVE',
 		'HHMEMDRV', 'HH_ONTD', 'NONHHCNT', 'NUMONTRP', 'PSGR_FLG', 'DRVR_FLG', 'ONTD_P1', 'ONTD_P2', 'ONTD_P3',
@@ -26,13 +29,18 @@ def MakeItineraries(weekday=True):
 		'OBRESDN', 'DTHTNRNT', 'DTPPOPDN', 'DTRESDN', 'DTEEMPDN', 'DBHTNRNT', 'DBPPOPDN', 'DBRESDN'
 	], axis=1)
 
-	# Apply the TDWKND filter based on the weekday parameter
-	if weekday:
-		trips = trips[trips["TDWKND"] == 2]  # Select weekdays
+	# Filter trips based on day type
+	if day_type == "weekday":
+		trips = trips[trips["TDWKND"] == 2]  # Select only weekdays
+	elif day_type == "weekend":
+		trips = trips[trips["TDWKND"] == 1]  # Select only weekends
+	elif day_type == "all":
+		pass  # No filtering needed for all days
 	else:
-		trips = trips[trips["TDWKND"] == 1]  # Select weekends
+		raise ValueError("day_type must be one of 'weekday', 'weekend', or 'all'")
 
-	trip_veh = [1, 2, 3, 4, 5, 6]
+	# Further filtering of trips based on trip and vehicle criteria
+	trip_veh = [3, 4, 5, 6]
 	veh_type = [-1, 1, 2, 3, 4, 5]
 
 	trips = trips[trips["TRPTRANS"].isin(trip_veh)]
@@ -42,29 +50,22 @@ def MakeItineraries(weekday=True):
 	trips = trips[trips["TRPMILES"] < 500]
 
 	new_itineraries = trips
-	print(' {:.4f} seconds'.format(time.time()-t0))
+	print(' {:.4f} seconds'.format(time.time() - t0))
 
 	t0 = time.time()
 	print('Creating itinerary dicts:', end='')
 
 	# Selecting for household vehicles
-	new_itineraries = new_itineraries[(
-		(new_itineraries['TRPHHVEH'] == 1) &
-		(new_itineraries['TRPTRANS'] >= 3) &
-		(new_itineraries['TRPTRANS'] <= 6)
-		)].copy()
+	new_itineraries = new_itineraries[(new_itineraries['TRPHHVEH'] == 1)].copy()
 
 	# Get unique combinations of household, vehicle, and person IDs
 	unique_combinations = new_itineraries[['HOUSEID', 'VEHID', 'PERSONID']].drop_duplicates()
-
-	# Start timer
-	t0 = time.time()
 
 	# Initialize an array to store each itinerary dictionary
 	itineraries = np.array([None] * unique_combinations.shape[0])
 
 	# Main loop: iterate over each unique household-vehicle-person combination in the test set
-	for idx, row in tqdm(enumerate(unique_combinations.itertuples(index=False))):
+	for idx, row in tqdm(enumerate(unique_combinations.itertuples(index=False)), total=unique_combinations.shape[0]):
 		hh_id = row.HOUSEID
 		veh_id = row.VEHID
 		person_id = row.PERSONID
@@ -87,18 +88,27 @@ def MakeItineraries(weekday=True):
 	# Display time taken
 	print('Itineraries creation took {:.4f} seconds'.format(time.time() - t0))
 
-	# Save itineraries to a pickle file
-	# Set output file name based on weekday parameter
-	if weekday:
+	# Set output file name based on day_type parameter
+	if day_type == "weekday":
 		output_file = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekday.pkl'
-	else:
+	elif day_type == "weekend":
 		output_file = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekend.pkl'
+	elif day_type == "all":
+		output_file = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_all_days.pkl'
 
+	# Save itineraries to a pickle file
 	t0 = time.time()
 	print('Pickling outputs:', end='')
 	pkl.dump(itineraries, open(output_file, 'wb'))
 	print(' Done in {:.4f} seconds'.format(time.time() - t0))
+
+
+# Example usage
+
+
 # %%
-MakeItineraries(weekday=True)
-MakeItineraries(weekday=False)
+# MakeItineraries(day_type="all")
+# MakeItineraries(day_type="weekday")
+# MakeItineraries(day_type="weekend")
+
 

@@ -2,10 +2,10 @@ import sys
 import time
 import signal
 import numpy as np
-import pandas as pd
 from scipy.stats import t
 import os
-
+import pandas as pd
+import pickle
 from contextlib import contextmanager
 from scipy.special import comb
 
@@ -202,15 +202,53 @@ class PBIterator():
 			raise StopIteration
 
 
-def load_itineraries(weekday=True):
-    # Choose the filename based on the weekday parameter
-    filename = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekday.pkl' if weekday else '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekend.pkl'
+def load_itineraries(day_type="weekday"):
+    # Choose the filename based on the day_type parameter
+    if day_type == "weekday":
+        filename = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekday.pkl'
+    elif day_type == "weekend":
+        filename = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_weekend.pkl'
+    elif day_type == "all":
+        filename = '/Users/haniftayarani/V2G_national/charging/Data/Generated_Data/itineraries_all_days.pkl'
+    else:
+        raise ValueError("day_type must be one of 'weekday', 'weekend', or 'all'")
 
     # Check if the file exists and load it
     if os.path.isfile(filename):
         itineraries = pd.read_pickle(filename)
-        print(f'Loaded itineraries from {"weekday" if weekday else "weekend"} file.')
+        print(f'Loaded itineraries from {day_type} file.')
         return itineraries
     else:
         print(f'File {filename} does not exist.')
         return None
+
+
+def read_pkl(file_path):
+	# Load the pickle file
+	with open(file_path, 'rb') as file:
+		data = pickle.load(file)
+	# Check if the data is an array and display or convert it accordingly
+	if isinstance(data, np.ndarray):
+		# If the data is a single array
+		print("Data contains a single array:")
+		print(data)
+		# Optionally, convert to DataFrame if it's a 2D array
+		if data.ndim == 2:
+			df = pd.DataFrame(data)
+			print("\nConverted to DataFrame:")
+			print(df.head())
+	elif isinstance(data, list) and all(isinstance(i, np.ndarray) for i in data):
+		# If the data is a list of arrays
+		print("Data contains a list of arrays:")
+		for idx, array in enumerate(data):
+			print(f"\nArray {idx + 1}:")
+			print(array)
+			# Optionally, convert each array to DataFrame if it's 2D
+			if array.ndim == 2:
+				df = pd.DataFrame(array)
+				print("\nConverted to DataFrame:")
+				print(df.head())
+	else:
+		print("The pickle file contains data that is not an array or list of arrays.")
+	combined_df = pd.concat([entry['trips'] for entry in data], ignore_index=True)
+	return combined_df

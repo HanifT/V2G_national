@@ -1,15 +1,7 @@
-import sys
-import time
-import argparse
 import numpy as np
-import numpy.random as rand
 import pandas as pd
-import pickle as pkl
-import matplotlib.pyplot as plt
 import pyomo.environ as pyomo
-from copy import copy, deepcopy
-from datetime import datetime
-from .utilities import IsIterable,FullFact
+
 
 class EVCSP():
 
@@ -27,16 +19,16 @@ class EVCSP():
 	def ProcessItinerary(self,
 		itinerary,
 		home_charger_likelihood=1,
-		work_charger_likelihood=1,
+		work_charger_likelihood=0.75,
 		destination_charger_likelihood=.1,
-		consumption=478.8,
-		battery_capacity=82*3.6e6,
+		consumption=782.928,  # J/meter
+		battery_capacity=60*3.6e6,  # J
 		initial_soc=.5,
 		final_soc=.5,
-		ad_hoc_charger_power=150e3,
-		home_charger_power=12.1e3,
-		work_charger_power=12.1e3,
-		destination_charger_power=12.1e3,
+		ad_hoc_charger_power=100e3,
+		home_charger_power=6.1e3,
+		work_charger_power=6.1e3,
+		destination_charger_power=100.1e3,
 		ac_dc_conversion_efficiency=.88,
 		max_soc=1,
 		min_soc=.2,
@@ -44,7 +36,7 @@ class EVCSP():
 		max_ad_hoc_event_duration=7.2e3,
 		min_ad_hoc_event_duration=5*60,
 		payment_penalty=60,
-		travel_penalty=15*60,
+		travel_penalty=1*60,
 		dwell_charge_time_penalty=0,
 		ad_hoc_charge_time_penalty=1,
 		tiles=5,
@@ -59,6 +51,8 @@ class EVCSP():
 		#Cleaning trip and dwell durations
 		durations=itinerary['TRVLCMIN'].copy().to_numpy()
 		dwell_times=itinerary['DWELTIME'].copy().to_numpy()
+		# Replace negative values with zero
+		dwell_times = np.where(dwell_times < 0, 0, dwell_times)
 
 		#Fixing any non-real dwells
 		dwell_times[dwell_times<0]=dwell_times[dwell_times>=0].mean()
