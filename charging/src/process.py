@@ -4,7 +4,10 @@ import time
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+from datetime import datetime, timedelta
+import numpy as np
 
+# %%
 def _print(string, disp=True):
 
     if disp:
@@ -134,19 +137,7 @@ def plot_charging_demand(df, plot_type='total'):
 
 
 def plot_days_between_charges(data, min_energy=2, min_days=0, max_days=10, excluded_makes=["Nissan", "Toyota"]):
-    """
-    Filters data, calculates days between charging sessions, and plots the distribution of days between charges by vehicle model.
 
-    Parameters:
-    - data (DataFrame): The DataFrame containing charging data with 'Make', 'vehicle_name', 'start_time_ (local)', 'total_energy', and 'Model' columns.
-    - min_energy (float): Minimum energy threshold for filtering charging sessions.
-    - min_days (int): Minimum days between charges to consider in the plot.
-    - max_days (int): Maximum days between charges to consider in the plot.
-    - excluded_makes (list): List of vehicle makes to exclude from the analysis.
-
-    Returns:
-    - None: Displays a box plot of days between charges for each vehicle model.
-    """
     # Exclude specific vehicle makes
     data_filtered = data[~data["Make"].isin(excluded_makes)]
 
@@ -308,3 +299,508 @@ def calculate_days_between_charges_synt(df):
     plt.show()
 
     return df, df_filtered
+
+
+def create_charging_demand_curve_agg(df):
+    # Step 1: Divide `day_of_year` into 14 periods
+    df["Period_Day"] = (df["day_of_year"] - 1) // (365 // 14)  # Map day_of_year to one of 14 periods
+
+    # Step 2: Round start_time and end_time to the nearest 30 minutes
+    def round_to_half_hour(timestamp):
+        dt = datetime.strptime(timestamp, "%m/%d/%y %H:%M")  # Parse the timestamp
+        if dt.minute < 15:
+            dt = dt.replace(minute=0)
+        elif dt.minute < 45:
+            dt = dt.replace(minute=30)
+        else:
+            dt = dt.replace(minute=0) + timedelta(hours=1)
+        return dt
+
+    df["Start_Rounded"] = df["start_time"].apply(round_to_half_hour)
+    df["End_Rounded"] = df["end_time"].apply(round_to_half_hour)
+
+    # Step 3: Assign charging speeds based on `energy[charge__type][type]`
+    def assign_charging_speed(charge_type):
+        if charge_type == "LEVEL_2":
+            return 6.6
+            # kW
+        elif charge_type == "DC_FAST":
+            return 150  # kW
+        else:
+            return 0  # No charging
+
+    df["Charging_Speed"] = df["energy[charge_type][type]"].apply(assign_charging_speed)
+
+    # Step 4: Initialize the demand curve for 14 days (48 periods/day)
+    max_days = 14
+    demand_curve = np.zeros(max_days * 48)
+
+    # Step 5: Simulate charging sessions
+    for _, row in df.iterrows():
+        charging_speed = row["Charging_Speed"]
+        total_energy = row["total_energy"]  # Energy required for charging (kWh)
+        soc_remaining = total_energy  # Remaining energy to charge
+        start_time = row["Start_Rounded"]
+        end_time = row["End_Rounded"]
+        current_day = row["Period_Day"]
+
+        # Calculate start and end periods
+        start_period = (start_time.hour * 2) + (1 if start_time.minute >= 30 else 0)
+        end_period = (end_time.hour * 2) + (1 if end_time.minute >= 30 else 0)
+
+        while soc_remaining > 0:
+            if current_day >= max_days:  # Ignore days beyond the 14th period
+                break
+
+            # Get the start and end of the current day in terms of periods
+            daily_start = current_day * 48
+            daily_end = (current_day + 1) * 48
+
+            # Simulate charging across periods
+            for period in range(daily_start + start_period, daily_end):
+                if soc_remaining <= 0:
+                    break
+                charge_time = 0.5  # 30 minutes
+                charge_amount = min(soc_remaining, charging_speed * charge_time)
+                demand_curve[period] += charge_amount
+                soc_remaining -= charge_amount
+
+            current_day += 1  # Move to the next day
+            start_period = 0  # Reset to the start of the day
+
+    # Step 6: Create a DataFrame for the demand curve
+    demand_curve_df = pd.DataFrame({
+        "Period": np.tile(range(48), max_days),
+        "Day": np.repeat(range(max_days), 48),
+        "Demand (kWh)": demand_curve
+    })
+
+    return demand_curve_df
+
+
+def create_charging_demand_curve(df):
+    # Step 1: Divide `day_of_year` into 14 periods
+    df["Period_Day"] = (df["day_of_year"] - 1)# Map day_of_year to one of 14 periods
+
+    # Step 2: Round start_time and end_time to the nearest 30 minutes
+    def round_to_half_hour(timestamp):
+        dt = datetime.strptime(timestamp, "%m/%d/%y %H:%M")  # Parse the timestamp
+        if dt.minute < 15:
+            dt = dt.replace(minute=0)
+        elif dt.minute < 45:
+            dt = dt.replace(minute=30)
+        else:
+            dt = dt.replace(minute=0) + timedelta(hours=1)
+        return dt
+
+    df["Start_Rounded"] = df["start_time"].apply(round_to_half_hour)
+    df["End_Rounded"] = df["end_time"].apply(round_to_half_hour)
+
+    # Step 3: Assign charging speeds based on `energy[charge__type][type]`
+    def assign_charging_speed(charge_type):
+        if charge_type == "LEVEL_2":
+            return 6.6  # kW
+        elif charge_type == "DC_FAST":
+            return 150  # kW
+        else:
+            return 0  # No charging
+
+    df["Charging_Speed"] = df["energy[charge_type][type]"].apply(assign_charging_speed)
+
+    # Step 4: Initialize the demand curve for 14 days (48 periods/day)
+    max_days = 14
+    demand_curve = np.zeros(max_days * 48)
+
+    # Step 5: Simulate charging sessions
+    for _, row in df.iterrows():
+        charging_speed = row["Charging_Speed"]
+        total_energy = row["total_energy"]  # Energy required for charging (kWh)
+        soc_remaining = total_energy  # Remaining energy to charge
+        start_time = row["Start_Rounded"]
+        end_time = row["End_Rounded"]
+        current_day = row["Period_Day"]
+
+        # Calculate start and end periods
+        start_period = (start_time.hour * 2) + (1 if start_time.minute >= 30 else 0)
+        end_period = (end_time.hour * 2) + (1 if end_time.minute >= 30 else 0)
+
+        while soc_remaining > 0:
+            if current_day >= max_days:  # Ignore days beyond the 14th period
+                break
+
+            # Get the start and end of the current day in terms of periods
+            daily_start = current_day * 48
+            daily_end = (current_day + 1) * 48
+
+            # Simulate charging across periods
+            for period in range(daily_start + start_period, daily_end):
+                if soc_remaining <= 0:
+                    break
+                charge_time = 0.5  # 30 minutes
+                charge_amount = min(soc_remaining, charging_speed * charge_time)
+                demand_curve[period] += charge_amount
+                soc_remaining -= charge_amount
+
+            current_day += 1  # Move to the next day
+            start_period = 0  # Reset to the start of the day
+
+    # Step 6: Create a DataFrame for the demand curve
+    demand_curve_df = pd.DataFrame({
+        "Period": np.tile(range(48), max_days),
+        "Day": np.repeat(range(max_days), 48),
+        "Demand (kWh)": demand_curve
+    })
+
+    return demand_curve_df
+
+
+def plot_charging_demand_curve(demand_curve_df):
+    # Filter the data to include only 14 days
+    demand_curve_df = demand_curve_df[demand_curve_df["Day"] < 13]
+
+    # Create custom x-tick labels for 24-hour format across 7 days
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    # Generate x-tick positions and labels for the entire week
+    x_ticks = np.arange(0, 48 * 14, 48)  # 48 periods per day
+    x_tick_labels = [f"{day}" for day in days]
+    # Create custom x-tick labels for 24-hour format across 14 days
+    # days = [f"Day {i + 1}" for i in range(14)]
+    # x_ticks = np.arange(0, 48 * 14, 48)  # 48 periods per day
+    # x_tick_labels = days
+
+    # Plot the demand curve
+    plt.figure(figsize=(14, 7))
+    plt.plot(
+        demand_curve_df["Period"] + demand_curve_df["Day"] * 48,
+        demand_curve_df["Demand (kWh)"],
+        label="Charging Demand",
+        color="blue"
+    )
+
+    # Set the x-axis ticks and labels
+    plt.xticks(ticks=x_ticks, labels=x_tick_labels, rotation=45)
+
+    # Add gridlines to separate days
+    for tick in x_ticks:
+        plt.axvline(x=tick, color='grey', linestyle='--', linewidth=0.5)
+
+    # Add labels and title
+    plt.xlabel("Day of the Week")
+    plt.ylabel("Charging Demand (kWh)")
+    plt.title("Weekly Charging Demand Curve")
+    plt.grid()
+    plt.tight_layout()
+    plt.legend()
+    plt.show()
+
+def map_whytrp1s_to_destination(df, column="WHYTRP1S"):
+    whytrp1s_mapping = {
+        1: "Home",
+        10: "Work",
+        20: "School",
+        30: "Medical",
+        40: "Shopping",
+        50: "Social",
+        70: "Transport",
+        80: "Meals",
+        97: "Other"
+    }
+    # Map the WHYTRP1S values to a new column 'Destination'
+    df["Destination"] = df[column].map(whytrp1s_mapping)
+    return df
+
+
+def determine_charging_level(row):
+    if row["charging"] and row["Destination"] in ["Home", "Work", "School"]:
+        return "Level_2"
+    elif row["charging"]:
+        return "DC_Fast"
+    else:
+        return None  # No charging session
+
+    # Define a function to assign charging speed
+
+def determine_charging_speed(charging_level):
+    if charging_level == "Level_2":
+        return 6.6  # Level 2 charging speed
+    elif charging_level == "DC_Fast":
+        return 150  # DC Fast charging speed
+    else:
+        return None  # No charging speed if there's no charging level
+
+def batt_kwh(bat_cap):
+    return bat_cap * 2.77778e-7
+
+
+def calculate_charging_times(df):
+    # Ensure data is sorted by HOUSEID, PERSONID, VEHID, order, and STRTTIME for processing
+    df = df.sort_values(by=["HOUSEID", "PERSONID", "VEHID", "order", "STRTTIME"]).reset_index(drop=True)
+
+    # Initialize empty columns
+    df["Charging_Start_Time"] = None
+    df["Charging_End_Time"] = None
+
+    # Iterate through each unique combination of HOUSEID, PERSONID, and VEHID
+    for key, group in df.groupby(["HOUSEID", "PERSONID", "VEHID"]):
+        group_indices = group.index  # Indices of the group for assigning values
+        first_start_time = int(group.iloc[0]["STRTTIME"])  # Store the first row's STRTTIME
+
+        for i, idx in enumerate(group_indices):
+            # Skip rows where the Charging Level is "None"
+            if group.loc[idx, "Charging_Level"] == None:
+                continue
+
+            # Assign Charging Start Time as ENDTIME
+            df.loc[idx, "Charging_Start_Time"] = group.loc[idx, "ENDTIME"]
+
+            if i < len(group_indices) - 1:
+                # For non-last rows, Charging End Time is the next STRTTIME
+                df.loc[idx, "Charging_End_Time"] = group.loc[group_indices[i + 1], "STRTTIME"]
+            else:
+                # For the last row in the group, Charging End Time is the next morning's first STRTTIME
+                df.loc[idx, "Charging_End_Time"] = str(
+                    (2400 + first_start_time) % 2400
+                ).zfill(4)  # Format to 4 digits (e.g., 800 -> "0800")
+
+            # Check for DC_Fast chargers and limit the duration to 1 hour
+            if group.loc[idx, "Charging_Level"] == "DC_Fast":
+                start_time = int(df.loc[idx, "Charging_Start_Time"])
+                end_time = int(df.loc[idx, "Charging_End_Time"])
+
+                if (end_time - start_time) > 100 or (start_time > end_time):  # Check if duration > 1 hour
+                    df.loc[idx, "Charging_End_Time"] = str((start_time + 100) % 2400).zfill(4)
+
+            # Handle cases where Charging End Time is smaller than Charging Start Time (next day)
+            start_time = int(df.loc[idx, "Charging_Start_Time"])
+            end_time = int(df.loc[idx, "Charging_End_Time"])
+
+            if end_time < start_time:
+                df.loc[idx, "Charging_End_Time"] = str((start_time + (2400 - start_time) + end_time) % 2400).zfill(4)
+
+    return df
+
+def calculate_charging_energy(df):
+
+    # Ensure the DataFrame is sorted to allow correct computation
+    df = df.sort_values(by=["HOUSEID", "PERSONID", "VEHID", "order"]).reset_index(drop=True)
+
+    # Initialize the new column
+    df["Charged_Energy"] = np.nan
+
+    # Iterate through each group of HOUSEID, PERSONID, and VEHID
+    for key, group in df.groupby(["HOUSEID", "PERSONID", "VEHID"]):
+        # Iterate over rows in the group
+        for i in range(1, len(group)):
+            current_idx = group.index[i]
+            previous_idx = group.index[i - 1]
+
+            # Perform the calculation only if the current row is a charging event
+            if group.loc[current_idx, "charging"]:
+                # Previous SOC * Battery Capacity
+                previous_soc_energy = group.loc[previous_idx, "SOC"] * group.loc[previous_idx, "Battery Capacity"]
+
+                current_soc_energy = group.loc[current_idx, "SOC"] * group.loc[current_idx, "Battery Capacity"]
+
+                current_trip_energy = group.loc[current_idx, "Trip_Energy"]
+
+                # Energy charged = Previous SOC Energy + Trip Energy
+                charged_energy = current_soc_energy - (previous_soc_energy - current_trip_energy)
+
+                # Assign the value to the current row
+                df.loc[current_idx, "Charged_Energy"] = max(0, charged_energy) / 3.6e6 # Ensure non-negative values
+
+    return df
+
+
+def assign_day_numbers(df):
+    # Ensure the DataFrame is sorted to detect day changes
+    df = df.sort_values(by=["HOUSEID", "PERSONID", "VEHID", "order"]).reset_index(drop=True)
+
+    # Initialize the new column
+    df["Day_Number"] = np.nan
+
+    # Iterate through each group of HOUSEID, PERSONID, and VEHID
+    for key, group in df.groupby(["HOUSEID", "PERSONID", "VEHID"]):
+        # Track the current day number
+        current_day_number = 1
+        previous_day = None
+
+        for idx in group.index:
+            # Assign the current day number if the day_of_week changes, increment day number
+            current_day = group.loc[idx, "days_of_week"]
+            if previous_day is not None and current_day != previous_day:
+                current_day_number += 1
+
+            # Assign the day number to the row
+            df.loc[idx, "Day_Number"] = current_day_number
+            previous_day = current_day
+
+    return df
+
+def calculate_trip_energy(df, vmt_column="TRPMILES", consumption_factor=782.928):
+    # Convert VMT_Mile to meters (1 mile = 1609.34 meters)
+    df["Trip_Distance_Meters"] = df[vmt_column] * 1609.34
+
+    # Calculate trip energy in Joules
+    df["Trip_Energy"] = df["Trip_Distance_Meters"] * consumption_factor # in jule
+
+    return df
+
+
+def create_weekly_charging_demand(df):
+    df = df[df["Day_Number"] <= 15]
+    # Filter data for valid charging sessions
+    charging_sessions = df[pd.notna(df["Charging_Level"])].copy()
+
+    # Define the rounding function
+    def round_to_half_hour(time):
+        time = int(time)  # Ensure the time is an integer
+        hour = time // 100
+        minute = time % 100
+
+        if minute < 15:
+            minute = 0
+        elif minute < 45:
+            minute = 30
+        else:
+            minute = 0
+            hour += 1
+
+        if hour == 24:  # Handle overflow to the next day
+            hour = 0
+
+        return hour * 100 + minute  # Return in HHMM format
+
+    # Map day names to integers
+    day_mapping = {
+        "Monday": 0,
+        "Tuesday": 1,
+        "Wednesday": 2,
+        "Thursday": 3,
+        "Friday": 4,
+        "Saturday": 5,
+        "Sunday": 6,
+    }
+
+    # Convert 'days_of_week' to integers
+    charging_sessions["days_of_week"] = charging_sessions["days_of_week"].map(day_mapping)
+
+    # Ensure columns are integers before applying the rounding function
+    charging_sessions["Charging_Start_Time"] = charging_sessions["Charging_Start_Time"].astype(int)
+
+    # Apply the rounding function
+    charging_sessions["Start_Rounded"] = charging_sessions["Charging_Start_Time"].apply(round_to_half_hour)
+
+    # Initialize the demand curve for 14 days (48 periods/day)
+    max_days = 15
+    weekly_demand = np.zeros(max_days * 48)
+
+    # Iterate through each charging session
+    for _, row in charging_sessions.iterrows():
+        charging_speed = row["Charging_Speed"]  # kWh per hour
+        charged_energy = row["Charged_Energy"]  # Energy to charge (kWh)
+        start_time = int(row["Start_Rounded"])
+        soc_remaining = charged_energy  # Remaining energy to be charged
+        current_day = int(row["Day_Number"]) - 1  # Adjust Day_Number to 0-based index
+        start_period = (start_time // 100) * 2 + (1 if start_time % 100 >= 30 else 0)
+
+        # Simulate charging across periods
+        while soc_remaining > 0:
+            # Ensure we don't go beyond the allocated days
+            if current_day >= max_days:
+                break
+
+            # Calculate periods for the current day
+            daily_start = current_day * 48
+            daily_end = (current_day + 1) * 48
+
+            for period in range(daily_start + start_period, daily_end):
+                if soc_remaining <= 0:
+                    break
+                charge_time = 0.5  # Each period is 30 minutes
+                charge_amount = min(soc_remaining, charging_speed * charge_time)  # kWh charged in this period
+                weekly_demand[period] += charge_amount
+                soc_remaining -= charge_amount
+
+            current_day += 1  # Move to the next day
+            start_period = 0  # Start from the beginning of the day
+
+    # Create a DataFrame for the demand curve
+    demand_curve = pd.DataFrame({
+        "Period": np.tile(range(48), max_days),
+        "Day": np.repeat(range(1, max_days + 1), 48),
+        "Demand (kWh)": weekly_demand
+    })
+
+    return demand_curve
+
+
+def plot_charging_synt(weekly_demand_curve):
+    # Filter the data to include only Monday to Sunday (7 days)
+    weekly_demand_curve_filtered = weekly_demand_curve[weekly_demand_curve["Day"] < 15]
+
+    # Create custom x-tick labels for 24-hour format across 7 days
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday"]
+
+    # Generate x-tick positions and labels for the entire week
+    x_ticks = np.arange(48, 48 * 16, 48)  # 48 periods per day
+    x_tick_labels = [f"{day}" for day in days]
+
+    plt.figure(figsize=(12, 6))
+
+    # Plot the demand curve
+    plt.plot(
+        weekly_demand_curve_filtered["Period"] + weekly_demand_curve_filtered["Day"] * 48,
+        weekly_demand_curve_filtered["Demand (kWh)"],
+        label="Charging Demand",
+        color="blue"
+    )
+
+    # Set the x-axis ticks and labels
+    plt.xticks(ticks=x_ticks, labels=x_tick_labels, rotation=45)
+
+    # Add gridlines to separate days
+    for tick in x_ticks:
+        plt.axvline(x=tick, color='grey', linestyle='--', linewidth=0.5)
+
+    # Add labels and title
+    plt.xlabel("Day of the Week")
+    plt.ylabel("Charging Demand (kWh)")
+    plt.title("Weekly Charging Demand Curve")
+    plt.grid()
+    plt.tight_layout()
+    plt.show()
+# %%
+
+def plot_battery_market_share_pie(battery_capacities, probabilities):
+    """
+    Plots a pie chart for the market share of battery capacities and displays the average of the rest.
+
+    Parameters:
+    - battery_capacities: List of battery capacities in joules.
+    - probabilities: List of probabilities corresponding to the battery capacities.
+    """
+    # Convert battery capacities to kWh
+    battery_capacities_kWh = [capacity / 3.6e6 for capacity in battery_capacities]  # Convert to kWh
+
+    # Calculate the average of the remaining battery capacities (excluding the last element)
+    avg_remaining = sum(battery_capacities_kWh[:-1]) / len(battery_capacities_kWh[:-1])
+
+    # Create labels for the pie chart
+    labels = [f"{int(cap)} kWh" for cap in battery_capacities_kWh]
+
+    # Update the label of the last element with the average of the remaining
+    labels[-1] += f"\n(Average of Rest)"
+
+    # Plot the pie chart
+    plt.figure(figsize=(6, 6))
+    plt.pie(probabilities, labels=labels, autopct='%1.1f%%', startangle=90, colors=plt.cm.Paired.colors)
+
+    # Add a title
+    plt.title("Battery Capacity Market Share", fontsize=14)
+
+    # Display the plot
+    plt.tight_layout()
+    plt.show()
+

@@ -39,7 +39,7 @@ class EVCSP():
 		travel_penalty=1*60,
 		dwell_charge_time_penalty=0,
 		ad_hoc_charge_time_penalty=1,
-		tiles=5,
+		tiles=7,
 		rng_seed=0,
 		**kwargs,
 		):

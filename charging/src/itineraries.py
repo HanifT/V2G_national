@@ -1,9 +1,14 @@
 import sys
+sys.path.append('/Users/haniftayarani/V2G_national/charging/src')
 import time
 import numpy as np
 import pandas as pd
 import pickle as pkl
 from tqdm import tqdm
+from temp import final_temp_adjustment
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
 # %%
 
 def MakeItineraries(day_type="weekday"):
@@ -14,20 +19,15 @@ def MakeItineraries(day_type="weekday"):
 
 	# Load data
 	trips = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/NHTS_2017/trippub.csv')
-	dmv = pd.read_csv('/Users/haniftayarani/V2G_national/charging/Data/dmv.csv')
-
+	temp = final_temp_adjustment()
+	trips = pd.merge(trips, temp[["Energy_Consumption", "HHSTATE", "HHSTFIPS"]], on=["HHSTATE", "HHSTFIPS"], how="left")
 	# Drop unnecessary columns
-	trips = trips.drop([
-		"TRPACCMP", "TRPHHACC", 'TRWAITTM', 'NUMTRANS', 'TRACCTM', 'DROP_PRK', 'TREGRTM', 'WHODROVE',
-		'HHMEMDRV', 'HH_ONTD', 'NONHHCNT', 'NUMONTRP', 'PSGR_FLG', 'DRVR_FLG', 'ONTD_P1', 'ONTD_P2', 'ONTD_P3',
-		'ONTD_P4', 'ONTD_P5', 'ONTD_P6', 'ONTD_P7', 'ONTD_P8', 'ONTD_P9', 'ONTD_P10', 'ONTD_P11', 'ONTD_P12',
-		'ONTD_P13', 'TRACC_WLK', 'TRACC_POV', 'TRACC_BUS', 'TRACC_CRL', 'TRACC_SUB', 'TRACC_OTH', 'TREGR_WLK',
-		'TREGR_POV', 'TREGR_BUS', 'TREGR_CRL', 'TREGR_SUB', 'TREGR_OTH', 'DRVRCNT', 'NUMADLT', 'WRKCOUNT',
-		'HHRESP', 'LIF_CYC', 'MSACAT', 'MSASIZE', 'RAIL', 'HH_RACE', 'HH_HISP', 'HH_CBSA', 'SMPLSRCE', 'R_AGE',
-		'EDUC', 'R_SEX', 'PRMACT', 'PROXY', 'WORKER', 'DRIVER', 'WTTRDFIN', 'WHYTRP90', 'TRPMILAD', 'R_AGE_IMP',
-		'R_SEX_IMP', 'OBHUR', 'DBHUR', 'OTHTNRNT', 'OTPPOPDN', 'OTRESDN', 'OTEEMPDN', 'OBHTNRNT', 'OBPPOPDN',
-		'OBRESDN', 'DTHTNRNT', 'DTPPOPDN', 'DTRESDN', 'DTEEMPDN', 'DBHTNRNT', 'DBPPOPDN', 'DBRESDN'
-	], axis=1)
+	trips = trips[['HOUSEID', 'PERSONID', 'TDTRPNUM', 'STRTTIME', 'ENDTIME', 'TRVLCMIN',
+       'TRPMILES', 'TRPTRANS', 'VEHID', 'WHYFROM', 'LOOP_TRIP', 'TRPHHVEH',
+       'PUBTRANS', 'TRIPPURP', 'DWELTIME', 'TDWKND', 'VMT_MILE', 'WHYTRP1S',
+       'TDCASEID', 'WHYTO', 'TRAVDAY', 'HOMEOWN', 'HHSIZE', 'HHVEHCNT',
+       'HHFAMINC', 'HHSTATE', 'HHSTFIPS', 'TDAYDATE', 'URBAN', 'URBANSIZE',
+       'URBRUR', 'GASPRICE', 'CENSUS_D', 'CENSUS_R', 'CDIVMSAR', 'VEHTYPE',"Energy_Consumption"]]
 
 	# Filter trips based on day type
 	if day_type == "weekday":
@@ -48,6 +48,10 @@ def MakeItineraries(day_type="weekday"):
 	trips = trips[trips["TRVLCMIN"] > 0]
 	trips = trips[trips["VEHTYPE"].isin(veh_type)]
 	trips = trips[trips["TRPMILES"] < 500]
+	# Selecting for household vehicles
+	trips = trips[(
+			(trips['VEHID'] <= 2)
+	)].copy()
 
 	new_itineraries = trips
 	print(' {:.4f} seconds'.format(time.time() - t0))
@@ -101,10 +105,6 @@ def MakeItineraries(day_type="weekday"):
 	print('Pickling outputs:', end='')
 	pkl.dump(itineraries, open(output_file, 'wb'))
 	print(' Done in {:.4f} seconds'.format(time.time() - t0))
-
-
-# Example usage
-
 
 # %%
 # MakeItineraries(day_type="all")
