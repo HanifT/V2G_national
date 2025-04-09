@@ -1,1 +1,11 @@
-.cache.sqlite
+# Ignore common file types
+*.pkl
+*.csv
+*.json
+*.xlsx
+
+# Ignore other unwanted files
+__pycache__/
+*.pyc
+.DS_Store
+codebook.pdf.cache.sqlite

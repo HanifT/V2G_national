@@ -1,644 +1,578 @@
 import numpy as np
 import pandas as pd
 import pyomo.environ as pyomo
-
-
-class EVCSP():
-
-	def __init__(self, itinerary={}, itinerary_kwargs={}, inputs={}):
-
-		if itinerary:
-			self.inputs=self.ProcessItinerary(itinerary['trips'], **itinerary_kwargs)
-		else:
-			self.inputs=inputs
-
-		if self.inputs:
-
-			self.Build()
-
-	def ProcessItinerary(self,
-		itinerary,
-		home_charger_likelihood=1,
-		work_charger_likelihood=0.75,
-		destination_charger_likelihood=.1,
-		consumption=782.928,  # J/meter
-		battery_capacity=60*3.6e6,  # J
-		initial_soc=.5,
-		final_soc=.5,
-		ad_hoc_charger_power=100e3,
-		home_charger_power=6.1e3,
-		work_charger_power=6.1e3,
-		destination_charger_power=100.1e3,
-		ac_dc_conversion_efficiency=.88,
-		max_soc=1,
-		min_soc=.2,
-		min_dwell_event_duration=15*60,
-		max_ad_hoc_event_duration=7.2e3,
-		min_ad_hoc_event_duration=5*60,
-		payment_penalty=60,
-		travel_penalty=1*60,
-		dwell_charge_time_penalty=0,
-		ad_hoc_charge_time_penalty=1,
-		tiles=7,
-		rng_seed=0,
-		**kwargs,
-		):
-
-		#Generating a random seed if none provided
-		if not rng_seed:
-			rng_seed=np.random.randint(1e6)
-
-		#Cleaning trip and dwell durations
-		durations=itinerary['TRVLCMIN'].copy().to_numpy()
-		dwell_times=itinerary['DWELTIME'].copy().to_numpy()
-		# Replace negative values with zero
-		dwell_times = np.where(dwell_times < 0, 0, dwell_times)
-
-		#Fixing any non-real dwells
-		dwell_times[dwell_times<0]=dwell_times[dwell_times>=0].mean()
-		
-		#Padding with overnight dwell
-		sum_of_times=durations.sum()+dwell_times[:-1].sum()
-
-		# Convert to float before applying ratio to allow float multiplication
-		dwell_times = dwell_times.astype(float)
-		durations = durations.astype(float)
-
-		# Adjust dwell_times and durations based on the calculated ratio
-		if sum_of_times >= 1440:
-			ratio = 1440 / sum_of_times
-			dwell_times *= ratio
-			durations *= ratio
-		else:
-			final_dwell = 1440 - durations.sum() - dwell_times[:-1].sum()
-			dwell_times[-1] = final_dwell
-
-		#Trip information
-		trip_distances=np.tile(itinerary['TRPMILES'].to_numpy(),tiles)*1609.34 #[m]
-		trip_times=np.tile(durations,tiles)*60 #[s]
-		trip_mean_speeds=trip_distances/trip_times #[m/s]
-		trip_discharge=trip_distances*consumption #[J]
-
-		#Dwell information
-		dwells=np.tile(dwell_times,tiles)*60
-		location_types=np.tile(itinerary['WHYTRP1S'].to_numpy(),tiles)
-		is_home=location_types==1
-		is_work=location_types==10
-		is_other=((~is_home)&(~is_work))
-
-		n_e=len(dwells)
-
-		#Assigning chargers to dwells
-		generator=np.random.default_rng(seed=rng_seed)
-
-		destination_charger_power_array=np.zeros(n_e)
-		destination_charger_power_array[is_home]=home_charger_power
-		destination_charger_power_array[is_work]=work_charger_power
-		destination_charger_power_array[is_other]=destination_charger_power
-
-		home_charger_selection=(
-			generator.random(is_home.sum())<=home_charger_likelihood)
-		work_charger_selection=(
-			generator.random(is_work.sum())<=work_charger_likelihood)
-		destination_charger_selection=(
-			generator.random(is_other.sum())<=destination_charger_likelihood)
-
-		destination_charger_power_array[is_home]*=home_charger_selection
-		destination_charger_power_array[is_work]*=work_charger_selection
-		destination_charger_power_array[is_other]*=destination_charger_selection
-
-		#Assembling inputs
-		inputs={}
-
-		inputs['n_e']=n_e
-		inputs['s_i']=initial_soc*battery_capacity
-		inputs['s_f']=final_soc*battery_capacity
-		inputs['s_ub']=max_soc*battery_capacity
-		inputs['s_lb']=min_soc*battery_capacity
-		inputs['c_db']=np.ones(n_e)*payment_penalty*is_other
-		inputs['c_dd']=np.ones(n_e)*dwell_charge_time_penalty
-		inputs['c_ab']=np.ones(n_e)*(travel_penalty+payment_penalty)
-		inputs['c_ad']=np.ones(n_e)*ad_hoc_charge_time_penalty
-		inputs['r_d']=destination_charger_power_array
-		inputs['r_a']=np.ones(n_e)*ad_hoc_charger_power
-		inputs['d_e_min']=np.ones(n_e)*min_dwell_event_duration
-		inputs['d_e_max']=dwells
-		inputs['a_e_min']=np.ones(n_e)*min_ad_hoc_event_duration
-		inputs['a_e_max']=np.ones(n_e)*max_ad_hoc_event_duration
-		inputs['d']=trip_discharge
-		inputs['b_c']=battery_capacity
-		inputs['l_i']=trip_distances.sum()
-		inputs['is_home']=is_home
-		inputs['is_work']=is_work
-		inputs['is_other']=is_other
-
-		return inputs
-
-	def Solve(self,solver_kwargs={}):
-
-		solver=pyomo.SolverFactory(**solver_kwargs)
-		res = solver.solve(self.model)
-		self.solver_status = res.solver.status
-		self.solver_termination_condition = res.solver.termination_condition
-
-		self.Solution()
-		self.Compute()
-
-	def Build(self):
-
-		#Pulling the keys from the inputs dict
-		keys=self.inputs.keys()
-
-		#Initializing the model as a concrete model
-		#(as in one that has fixed inputted values)
-		self.model=pyomo.ConcreteModel()
-
-		#Adding variables
-		self.Variables()
-
-		#Adding the objective function
-		self.Objective()
-
-		#Bounds constraints
-		self.Bounds()
-
-		#Unit commitment constraints
-		self.Unit_Commitment()
-
-	def Variables(self):
-
-		self.model.E=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_e'])])
-
-		self.model.u_dd=pyomo.Var(self.model.E,domain=pyomo.NonNegativeReals)
-		self.model.u_db=pyomo.Var(self.model.E,domain=pyomo.Boolean)
-
-		self.model.u_ad=pyomo.Var(self.model.E,domain=pyomo.NonNegativeReals)
-		self.model.u_ab=pyomo.Var(self.model.E,domain=pyomo.Boolean)
-
-	def Objective(self):
-
-		destination_charge_event=sum(
-			self.inputs['c_db'][e]*self.model.u_db[e] for e in self.model.E)
-
-		if np.any(self.inputs['c_dd']>0):
-			destination_charge_duration=sum(
-				self.inputs['c_dd'][e]*self.model.u_dd[e] for e in self.model.E)
-		else:
-			destination_charge_duration=0
-
-		ad_hoc_charge_event=sum(
-			self.inputs['c_ab'][e]*self.model.u_ab[e] for e in self.model.E)
-
-		if np.any(self.inputs['c_ad']>0):
-			ad_hoc_charge_duration=sum(
-				self.inputs['c_ad'][e]*self.model.u_ad[e] for e in self.model.E)
-		else:
-			ad_hoc_charge_duration=0
-
-		self.model.objective=pyomo.Objective(expr=(
-			destination_charge_event+
-			destination_charge_duration+
-			ad_hoc_charge_event+
-			ad_hoc_charge_duration))
-
-	def Bounds(self):
-
-		self.model.bounds=pyomo.ConstraintList()
-		self.model.fs=pyomo.ConstraintList()
-
-		ess_state=self.inputs['s_i']
-
-		for e in range(self.inputs['n_e']):
-
-			ess_state+=(
-				self.model.u_dd[e]*self.inputs['r_d'][e]+
-				self.model.u_ad[e]*self.inputs['r_a'][e]-
-				self.inputs['d'][e])
-
-			self.model.bounds.add((self.inputs['s_lb'],ess_state,self.inputs['s_ub']))
-
-		self.model.fs.add(expr=ess_state==self.inputs['s_f'])
-
-	def Unit_Commitment(self):
-
-		self.model.unit_commitment=pyomo.ConstraintList()
-
-		for e in range(self.inputs['n_e']):
-
-			self.model.unit_commitment.add(
-				expr=(self.inputs['d_e_min'][e]*self.model.u_db[e]-self.model.u_dd[e]<=0))
-			
-			self.model.unit_commitment.add(
-				expr=(self.inputs['d_e_max'][e]*self.model.u_db[e]-self.model.u_dd[e]>=0))
-
-			self.model.unit_commitment.add(
-				expr=(self.inputs['a_e_min'][e]*self.model.u_ab[e]-self.model.u_ad[e]<=0))
-			
-			self.model.unit_commitment.add(
-				expr=(self.inputs['a_e_max'][e]*self.model.u_ab[e]-self.model.u_ad[e]>=0))
-
-	def Solution(self):
-		'''
-		From StackOverflow
-		https://stackoverflow.com/questions/67491499/
-		how-to-extract-indexed-variable-information-in-pyomo-model-and-build-pandas-data
-		'''
-		model_vars=self.model.component_map(ctype=pyomo.Var)
-
-		serieses=[]   # collection to hold the converted "serieses"
-		for k in model_vars.keys():   # this is a map of {name:pyo.Var}
-			v=model_vars[k]
-
-			# make a pd.Series from each    
-			s=pd.Series(v.extract_values(),index=v.extract_values().keys())
-
-			# if the series is multi-indexed we need to unstack it...
-			if type(s.index[0])==tuple:# it is multi-indexed
-				s=s.unstack(level=1)
-			else:
-				s=pd.DataFrame(s) # force transition from Series -> df
-
-			s.columns=pd.MultiIndex.from_tuples([(k,t) for t in s.columns])
-
-			serieses.append(s)
-
-		self.solution=pd.concat(serieses,axis=1)
-
-	def Compute(self):
-		'''
-		Computing SOC in time and SIC for itinerary
-		'''
-
-		ess_state=np.append(self.inputs['s_i'],
-			self.inputs['s_i']+np.cumsum(-self.inputs['d'])+
-			np.cumsum(self.solution['u_dd'][0]*self.inputs['r_d'])+
-			np.cumsum(self.solution['u_ad'][0]*self.inputs['r_a'])
-			)
-		soc=ess_state/self.inputs['b_c']
-
-		self.sic=((
-			sum(self.solution['u_db'][0]*self.inputs['c_db'])+
-			sum(self.solution['u_dd'][0]*self.inputs['c_dd'])*+
-			sum(self.solution['u_ab'][0]*self.inputs['c_ab'])+
-			sum(self.solution['u_ad'][0]*self.inputs['c_ad'])
-			)/60)/(self.inputs['l_i']/1e3)
-
-		self.solution['soc',0]=soc[1:]
-
-class SEVCSP():
-
-	def __init__(self,itinerary={},itinerary_kwargs={},inputs={}):
-
-		if itinerary:
-			self.inputs=self.ProcessItinerary(itinerary['trips'],**itinerary_kwargs)
-		else:
-			self.inputs=inputs
-
-		if self.inputs:
-
-			self.Build()
-
-	def ProcessItinerary(self,
-		itinerary,
-		instances=1,
-		home_charger_likelihood=.5,
-		work_charger_likelihood=.1,
-		destination_charger_likelihood=.1,
-		consumption=478.8,
-		battery_capacity=82*3.6e6,
-		initial_soc=.5,
-		final_soc=.5,
-		ad_hoc_charger_power=121e3,
-		home_charger_power=12.1e3,
-		work_charger_power=12.1e3,
-		destination_charger_power=12.1e3,
-		ac_dc_conversion_efficiency=.88,
-		max_soc=1,
-		min_soc=.2,
-		min_dwell_event_duration=15*60,
-		max_ad_hoc_event_duration=7.2e3,
-		min_ad_hoc_event_duration=5*60,
-		payment_penalty=60,
-		travel_penalty=15*60,
-		dwell_charge_time_penalty=0,
-		ad_hoc_charge_time_penalty=1,
-		tiles=5,
-		rng_seed=0,
-		**kwargs,
-		):
-
-		#Generating a random seed if none provided
-		if not rng_seed:
-			rng_seed=np.random.randint(1e6)
-
-		#Pulling trips for driver only
-		# person=itinerary['PERSONID'].copy().to_numpy()
-		# whodrove=itinerary['WHODROVE'].copy().to_numpy()
-		# itinerary=itinerary[person==whodrove]
-
-		#Cleaning trip and dwell durations
-		durations=itinerary['TRVLCMIN'].copy().to_numpy()
-		dwell_times=itinerary['DWELTIME'].copy().to_numpy()
-
-		#Fixing any non-real dwells
-		dwell_times[dwell_times<0]=dwell_times[dwell_times>=0].mean()
-
-		#Padding with overnight dwell
-		sum_of_times=durations.sum()+dwell_times[:-1].sum()
-		if sum_of_times>=1440:
-			ratio=1440/sum_of_times
-			dwell_times*=ratio
-			durations*=ratio
-		else:
-			final_dwell=1440-durations.sum()-dwell_times[:-1].sum()
-			dwell_times[-1]=final_dwell
-
-		#Trip information
-		trip_distances=np.tile(itinerary['TRPMILES'].to_numpy(),tiles)*1609.34 #[m]
-		trip_times=np.tile(durations,tiles)*60 #[s]
-		trip_mean_speeds=trip_distances/trip_times #[m/s]
-		trip_discharge=trip_distances*consumption #[J]
-
-		#Dwell information
-		dwells=np.tile(dwell_times,tiles)*60
-		location_types=np.tile(itinerary['WHYTRP1S'].to_numpy(),tiles)
-		is_home=location_types==1
-		is_work=location_types==10
-		is_other=((~is_home)&(~is_work))
-
-		n_e=len(dwells)
-
-		#Assigning chargers to dwells
-		generator=np.random.default_rng(seed=rng_seed)
-
-		destination_charger_power_array=np.zeros((instances,n_e))
-		destination_charger_power_array[:,is_home]=home_charger_power
-		destination_charger_power_array[:,is_work]=work_charger_power
-		destination_charger_power_array[:,is_other]=destination_charger_power
-
-		home_charger_selection=(
-			generator.random((instances,is_home.sum()))<=home_charger_likelihood)
-		work_charger_selection=(
-			generator.random((instances,is_work.sum()))<=work_charger_likelihood)
-		# print(generator.random((instances,is_work.sum()))<=work_charger_likelihood)
-		# print(work_charger_likelihood)
-		destination_charger_selection=(np.tile(
-			generator.random(is_other.sum()),(instances,1))<=destination_charger_likelihood)
-
-		destination_charger_power_array[:,is_home]*=home_charger_selection
-		destination_charger_power_array[:,is_work]*=work_charger_selection
-		destination_charger_power_array[:,is_other]*=destination_charger_selection
-
-		#Assembling inputs
-		inputs={}
-
-		inputs['n_e']=n_e
-		inputs['n_s']=instances
-		inputs['s_i']=initial_soc*battery_capacity
-		inputs['s_f']=final_soc*battery_capacity
-		inputs['s_ub']=max_soc*battery_capacity
-		inputs['s_lb']=min_soc*battery_capacity
-		inputs['c_db']=np.ones(n_e)*payment_penalty*is_other
-		inputs['c_dd']=np.ones(n_e)*dwell_charge_time_penalty
-		inputs['c_ab']=np.ones(n_e)*(travel_penalty+payment_penalty)
-		inputs['c_ad']=np.ones(n_e)*ad_hoc_charge_time_penalty
-		inputs['r_d']=destination_charger_power_array
-		inputs['r_a']=np.ones(n_e)*ad_hoc_charger_power
-		inputs['d_e_min']=np.ones(n_e)*min_dwell_event_duration
-		inputs['d_e_max']=dwells
-		inputs['a_e_min']=np.ones(n_e)*min_ad_hoc_event_duration
-		inputs['a_e_max']=np.ones(n_e)*max_ad_hoc_event_duration
-		inputs['d']=trip_discharge
-		inputs['b_c']=battery_capacity
-		inputs['l_i']=trip_distances.sum()
-		inputs['is_home']=is_home
-		inputs['is_work']=is_work
-		inputs['is_other']=is_other
-
-		return inputs
-
-	def Solve(self,solver_kwargs={}):
-
-		solver=pyomo.SolverFactory(**solver_kwargs)
-		res = solver.solve(self.model)
-		self.solver_status = res.solver.status
-		self.solver_termination_condition = res.solver.termination_condition
-
-		self.Solution()
-		self.Compute()
-
-	def Build(self):
-
-		#Pulling the keys from the inputs dict
-		keys=self.inputs.keys()
-
-		#Initializing the model as a concrete model
-		#(as in one that has fixed inputted values)
-		self.model=pyomo.ConcreteModel()
-
-		#Adding variables
-		self.Variables()
-
-		#Adding the objective function
-		self.Objective()
-
-		#Bounds constraints
-		self.Bounds()
-
-		#Unit commitment constraints
-		self.Unit_Commitment()
-
-	def Variables(self):
-
-		self.model.S=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_s'])])
-		self.model.E=pyomo.Set(initialize=[idx for idx in range(self.inputs['n_e'])])
-
-		self.model.u_dd=pyomo.Var(self.model.S,self.model.E,domain=pyomo.NonNegativeReals)
-		self.model.u_db=pyomo.Var(self.model.S,self.model.E,domain=pyomo.Boolean)
-
-		self.model.u_ad=pyomo.Var(self.model.S,self.model.E,domain=pyomo.NonNegativeReals)
-		self.model.u_ab=pyomo.Var(self.model.E,domain=pyomo.Boolean)
-
-	def Objective(self):
-
-		ad_hoc_charge_event=sum(
-			self.inputs['c_ab'][e]*self.model.u_ab[e] for e in self.model.E)
-
-		for s in self.model.S:
-
-			destination_charge_event=sum(
-				self.inputs['c_db'][e]*self.model.u_db[s,e] for e in self.model.E)
-
-			if np.any(self.inputs['c_dd']>0):
-				destination_charge_duration=sum(
-					self.inputs['c_dd'][e]*self.model.u_dd[s,e] for e in self.model.E)
-			else:
-				destination_charge_duration=0
-
-			if np.any(self.inputs['c_ad']>0):
-				ad_hoc_charge_duration=sum(
-					self.inputs['c_ad'][e]*self.model.u_ad[s,e] for e in self.model.E)
-			else:
-				ad_hoc_charge_duration=0
-
-		self.model.objective=pyomo.Objective(expr=(
-			destination_charge_event+
-			destination_charge_duration+
-			ad_hoc_charge_event+
-			ad_hoc_charge_duration))
-
-	def Bounds(self):
-
-		self.model.bounds=pyomo.ConstraintList()
-		self.model.fs=pyomo.ConstraintList()
-
-		for s in self.model.S:
-
-			ess_state=self.inputs['s_i']
-
-			for e in self.model.E:
-
-				ess_state+=(
-					self.model.u_dd[s,e]*self.inputs['r_d'][s,e]+
-					self.model.u_ad[s,e]*self.inputs['r_a'][e]-
-					self.inputs['d'][e])
-
-				self.model.bounds.add((self.inputs['s_lb'],ess_state,self.inputs['s_ub']))
-
-			self.model.fs.add(expr=ess_state>=self.inputs['s_f'])
-
-	def Unit_Commitment(self):
-
-		self.model.unit_commitment=pyomo.ConstraintList()
-
-		for s in self.model.S:
-
-			for e in self.model.E:
-
-				self.model.unit_commitment.add(
-					expr=(self.inputs['d_e_min'][e]*self.model.u_db[s,e]-
-						self.model.u_dd[s,e]<=0))
-
-				self.model.unit_commitment.add(
-					expr=(self.inputs['d_e_max'][e]*self.model.u_db[s,e]-
-						self.model.u_dd[s,e]>=0))
-
-				self.model.unit_commitment.add(
-					expr=(self.inputs['a_e_min'][e]*self.model.u_ab[e]-
-						self.model.u_ad[s,e]<=0))
-
-				self.model.unit_commitment.add(
-					expr=(self.inputs['a_e_max'][e]*self.model.u_ab[e]-
-						self.model.u_ad[s,e]>=0))
-
-	def Solution(self):
-		'''
-		From StackOverflow
-		https://stackoverflow.com/questions/67491499/
-		how-to-extract-indexed-variable-information-in-pyomo-model-and-build-pandas-data
-		'''
-		model_vars=self.model.component_map(ctype=pyomo.Var)
-
-		serieses=[]   # collection to hold the converted "serieses"
-		for k in model_vars.keys():   # this is a map of {name:pyo.Var}
-			v=model_vars[k]
-
-			# make a pd.Series from each
-			s=pd.Series(v.extract_values(),index=v.extract_values().keys())
-
-			# if the series is multi-indexed we need to unstack it...
-			if type(s.index[0])==tuple:# it is multi-indexed
-				s=s.unstack(level=0)
-			else:
-				s=pd.DataFrame(s) # force transition from Series -> df
-
-			s.columns=pd.MultiIndex.from_tuples([(k,t) for t in s.columns])
-
-			serieses.append(s)
-
-		self.solution=pd.concat(serieses,axis=1)
-
-	def Compute(self):
-		'''
-		Computing SOC in time and SIC for itinerary
-		'''
-
-		sic=np.zeros(self.inputs['n_s'])
-
-		for s in range(self.inputs['n_s']):
-
-			ess_state=np.append(self.inputs['s_i'],
-				self.inputs['s_i']+np.cumsum(-self.inputs['d'])+
-				np.cumsum(self.solution['u_dd'][s]*self.inputs['r_d'][s])+
-				np.cumsum(self.solution['u_ad'][s]*self.inputs['r_a'][s])
-				)
-			soc=ess_state/self.inputs['b_c']
-
-			sic[s]=((
-				sum(self.solution['u_db'][s]*self.inputs['c_db'])+
-				sum(self.solution['u_dd'][s]*self.inputs['c_dd'])+
-				sum(self.solution['u_ab'][0]*self.inputs['c_ab'])+
-				sum(self.solution['u_ad'][s]*self.inputs['c_ad'])
-				)/60)/(self.inputs['l_i']/1e3)
-
-			self.solution['soc',s]=soc[1:]
-
-		self.sic=sic
-
-
-def SeparateInputs(inputs):
-
-	n_s_list=[val.shape for key,val in inputs.items() if hasattr(val,'shape')]
-	n_s_list=[val[0] for val in n_s_list if len(val)>1]
-	n_s=max(n_s_list)
-
-	separated_inputs_list=[None]*n_s
-
-	for idx in range(n_s):
-
-		separated_inputs={}
-
-		for key,val in inputs.items():
-
-			if hasattr(val,'shape'):
-				if len(val.shape)>1:
-					separated_inputs[key]=val[idx]
-				else:
-					separated_inputs[key]=val
-			else:
-				separated_inputs[key]=val
-
-		separated_inputs_list[idx]=separated_inputs
-
-	return separated_inputs_list
-
-def RunDeterministic(vehicle_class,itinerary,itinerary_kwargs={},solver_kwargs={}):
-
-	problem=vehicle_class(itinerary,itinerary_kwargs=itinerary_kwargs)
-	problem.Solve(solver_kwargs)
-
-	return problem.sic,problem
-
-def RunStochastic(itinerary,itinerary_kwargs={},solver_kwargs={}):
-
-	problem=SEVCSP(itinerary,itinerary_kwargs=itinerary_kwargs)
-	problem.Solve(solver_kwargs)
-
-	return problem.sic,problem
-
-def RunAsIndividuals(problem,solver_kwargs={}):
-
-	separated_inputs_list=SeparateInputs(problem.inputs)
-	
-	problems=[None]*len(separated_inputs_list)
-	sic=np.zeros(len(separated_inputs_list))
-
-	for idx in range(len(separated_inputs_list)):
-
-		problem=EVCSP(inputs=separated_inputs_list[idx])
-		problem.Solve(solver_kwargs)
-		
-		problems[idx]=problem
-		sic[idx]=problem.sic
-
-	return sic,problems
+from pyomo.util.infeasible import log_infeasible_constraints
+import logging
+import pandas as pd
+from collections import defaultdict
+from wtp import calculate_wtp
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("gurobipy").setLevel(logging.WARNING)
+logging.getLogger("pyomo").setLevel(logging.WARNING)
+
+class EVCSP_delay():
+
+    def __init__(self, itinerary={}, itinerary_kwargs={}, inputs={}):
+        self.sic = None  # ✅ Default value for infeasible cases
+        if itinerary:
+            self.inputs = self.ProcessItinerary(itinerary['trips'], **itinerary_kwargs)
+        else:
+            self.inputs = inputs
+
+        if self.inputs:
+            self.Build()
+
+    def ProcessItinerary(self,
+                         itinerary,
+                         home_charger_likelihood=1,
+                         work_charger_likelihood=0.75,
+                         destination_charger_likelihood=.1,
+                         midnight_charging_prob=0.5,
+                         consumption=782.928,  # J/meter
+                         battery_capacity=60 * 3.6e6,  # J
+                         initial_soc=.5,
+                         final_soc=.5,
+                         ad_hoc_charger_power=100e3,
+                         home_charger_power=6.1e3,
+                         work_charger_power=6.1e3,
+                         destination_charger_power=100.1e3,
+                         ac_dc_conversion_efficiency=.88,
+                         max_soc=1,
+                         min_soc=.2,
+                         min_dwell_event_duration=15 * 60,
+                         max_ad_hoc_event_duration=7.2e3,
+                         min_ad_hoc_event_duration=5 * 60,
+                         payment_penalty=60,
+                         travel_penalty=1 * 60,
+                         time_penalty= 60,
+                         dwell_charge_time_penalty=0,
+                         ad_hoc_charge_time_penalty=1,
+                         tiles=7,
+                         rng_seed=123,
+                         residential_rate=None,
+                         commercial_rate=None,
+                         other_rate=0.42,  # Default value
+                         home_penalty=0.0,  # No penalty at home
+                         work_penalty=0.1,  # 20% of ad-hoc penalty at work
+                         other_penalty=0.2,  # 40% of ad-hoc penalty at other locations
+                         ad_hoc_penalty=1.0,  # Full penalty at ad-hoc chargers
+                         **kwargs,
+                         ):
+
+        # Extract income and BEV range from itinerary
+        income = itinerary['Income'].to_numpy()
+        bev_range = (battery_capacity / consumption) * 0.000621371  #
+
+        # Calculate WTP for each trip
+        wtp = calculate_wtp(income, bev_range)
+
+        # 1. Create a random seed if none provided
+        if not rng_seed:
+            rng_seed = np.random.randint(1e6)
+        rng = np.random.default_rng(rng_seed)
+
+        # 2. We only pick ONE random day for the entire itinerary:
+        random_day = rng.integers(1, 366)  # random integer day in 1..365
+        allow_midnight_charging = rng.random(len(itinerary)) < midnight_charging_prob
+        # 3. Convert trip start times from HHMM to seconds-past-midnight
+        start_times_hhmm = itinerary['STRTTIME'].to_numpy()
+        end_times_hhmm = itinerary['ENDTIME'].to_numpy()
+        start_times = (end_times_hhmm // 100)
+
+        # 4. Driving / dwell durations
+        durations = itinerary['TRVLCMIN'].copy().to_numpy()  # in minutes
+        durations_sec = durations * 60
+        dwell_times = itinerary['DWELTIME'].copy().to_numpy()
+        dwell_times = np.where(dwell_times < 0, 1440, dwell_times)  # fix negative
+        # dwell_times[dwell_times < 0] = dwell_times[dwell_times >= 0].mean()
+
+        # 6. Expand trips/dwells by "tiles"
+        trip_distances = itinerary['TRPMILES'].copy().to_numpy() * 1609.34
+        trip_discharge = trip_distances * consumption
+        dwell_times_sec = dwell_times
+        dwells = np.tile(dwell_times_sec, tiles)  # dwell in seconds
+        durations_sec = np.tile(durations_sec, tiles)
+
+        # 7. Now build "absolute_start_times"
+        n_trips = len(dwells)
+
+        # Extract month and day from the itinerary
+        months = itinerary['Month'].to_numpy()
+        days = itinerary['Day'].to_numpy()
+
+        def compute_doy(months, days, leap_year=False):
+            # Days per month (for normal and leap years)
+            days_per_month = np.array([31, 28 + leap_year, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+            # Compute the cumulative days at the start of each month
+            start_of_month = np.insert(np.cumsum(days_per_month), 0, 0)[:-1]
+            # Compute DOY
+            doy = start_of_month[months - 1] + days
+
+            return doy
+
+        year = itinerary['Year'].iloc[0] if 'Year' in itinerary.columns else 2024  # Default to 2024
+        is_leap = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+        # Convert month/day to day of the year (DOY)
+        doy = compute_doy(months, days, leap_year=is_leap)
+        # Calculate the absolute start time in seconds
+        absolute_start_times = doy * 24 + start_times  # DOY to seconds + HHMM in seconds
+        d_e_max_hours = dwell_times.astype(int) / 60
+        absolute_start_hours = absolute_start_times.astype(int)
+
+        # 8. Location type arrays
+        location_types = np.tile(itinerary['WHYTRP1S'].to_numpy(), tiles)
+        is_home = location_types == 1
+        is_work = location_types == 10
+        is_other = ((~is_home) & (~is_work))
+        # 9. Charger assignment (like before)
+        generator = np.random.default_rng(seed=rng_seed)
+        destination_charger_power_array = np.zeros(n_trips)
+        destination_charger_power_array[is_home] = home_charger_power
+        destination_charger_power_array[is_work] = work_charger_power
+        destination_charger_power_array[is_other] = destination_charger_power
+        home_charger_selection = generator.random(is_home.sum()) <= home_charger_likelihood
+        work_charger_selection = generator.random(is_work.sum()) <= work_charger_likelihood
+        destination_charger_selection = generator.random(is_other.sum()) <= destination_charger_likelihood
+        destination_charger_power_array[is_home] *= home_charger_selection
+        destination_charger_power_array[is_work] *= work_charger_selection
+        destination_charger_power_array[is_other] *= destination_charger_selection
+
+        # 10. Build inputs
+        inputs = {}
+        inputs['allow_midnight_charging'] = allow_midnight_charging
+        inputs['end_times_hhmm'] = end_times_hhmm
+        inputs['residential_rate'] = residential_rate
+        inputs['commercial_rate'] = commercial_rate
+        inputs['other_rate'] = other_rate
+        inputs['n_e'] = n_trips
+        inputs['s_i'] = initial_soc * battery_capacity
+        inputs['s_f'] = final_soc * battery_capacity
+        inputs['s_ub'] = max_soc * battery_capacity
+        inputs['s_lb'] = min_soc * battery_capacity
+        # Penalties
+        inputs['c_db'] = np.ones(n_trips) * (payment_penalty + time_penalty) * is_other
+        inputs['c_dd'] = np.ones(n_trips) * dwell_charge_time_penalty
+        inputs['c_ab'] = np.ones(n_trips) * (travel_penalty + payment_penalty + time_penalty)
+        inputs['c_at'] = np.ones(n_trips) * travel_penalty
+        inputs['c_ad'] = np.ones(n_trips) * ad_hoc_charge_time_penalty
+        # Charger data
+        inputs['r_d'] = destination_charger_power_array
+        inputs['r_d_h'] = home_charger_power
+        inputs['r_d_w'] = work_charger_power
+        inputs['r_d_o'] = destination_charger_power
+        inputs['r_a'] = ad_hoc_charger_power
+        # Time bounds for each event
+        inputs['d_e_max'] = np.ones(n_trips) * d_e_max_hours
+        inputs['d_e_min'] = np.ones(n_trips) * min_dwell_event_duration
+        inputs['a_e_min'] = np.ones(n_trips) * min_ad_hoc_event_duration
+        inputs['a_e_max'] = np.ones(n_trips) * max_ad_hoc_event_duration
+        # For the trip consumption
+        inputs['d'] = trip_discharge
+        inputs['b_c'] = battery_capacity
+        inputs['l_i'] = trip_distances.sum()
+        # location flags
+        inputs['is_home'] = is_home
+        inputs['is_work'] = is_work
+        inputs['is_other'] = is_other
+        # The final absolute start times
+        inputs['absolute_start_times'] = absolute_start_hours
+        inputs['home_penalty'] = home_penalty
+        inputs['work_penalty'] = work_penalty
+        inputs['other_penalty'] = other_penalty
+        inputs['ad_hoc_penalty'] = ad_hoc_penalty
+        inputs['ad_hoc_travel_time_loss'] = travel_penalty  # 15 minutes at the start and 15 at the end
+        inputs['wtp'] = wtp * 60
+        # Store valid charging hours for each event
+        # Cap hours to 8759 (end of the year)
+        inputs['valid_hours'] = {
+            e: [
+                m for m in range(
+                    int(inputs['absolute_start_times'][e]),
+                    int((inputs['absolute_start_times'][e] + inputs['d_e_max'][e]))
+                )
+                if 0 <= m <= 8759
+            ]
+            for e in range(n_trips)
+        }
+
+        if isinstance(inputs['residential_rate'], list) and len(inputs['residential_rate']) == 8760:
+            mean_res_rate = np.mean(inputs['residential_rate'])
+            inputs['residential_rate'].append(mean_res_rate)  # Add hour 8760
+
+        if isinstance(inputs['commercial_rate'], list) and len(inputs['commercial_rate']) == 8760:
+            mean_com_rate = np.mean(inputs['commercial_rate'])
+            inputs['commercial_rate'].append(mean_com_rate)  # Add hour 8760
+
+        # If needed, transform the rate arrays from dict to list
+        if isinstance(inputs['residential_rate'], dict) and "rate" in inputs['residential_rate']:
+            inputs['residential_rate'] = [inputs['residential_rate']["rate"][str(hour)] for hour in range(8761)]
+
+        if isinstance(inputs['commercial_rate'], dict) and "rate" in inputs['commercial_rate']:
+            inputs['commercial_rate'] = [inputs['commercial_rate']["rate"][str(hour)] for hour in range(8761)]
+
+        return inputs
+
+    def Solve(self, solver_kwargs={}):
+        solver = pyomo.SolverFactory(**solver_kwargs)
+        # Add MIP gap for groubi (set to 5%)
+        solver.options['MIPGap'] = 0.9  # 35% MIP gap
+        solver.options['Threads'] = 24
+        solver.options['Presolve'] = 2
+        solver.options['Heuristics'] = 0.9  # Enable solver's internal heuristic
+        solver.options["OutputFlag"] = 0
+        solver.options["MIPFocus"] = 1  # Focus on finding feasible solutions faster
+        solver.options["Method"] = 2  # Barrier method for faster relaxation
+        solver.options["NodeMethod"] = 2  # Parallelized branch-and-bound
+        solver.options['Cuts'] = 3 # or 3
+        solver.options["LazyConstraints"] = 1  # Enable lazy constraints (can speed up MIP)
+
+        # Write the LP file for debugging
+        self.model.write("model.lp", io_options={"symbolic_solver_labels": True})
+        res = solver.solve(self.model, tee=False)
+        self.solver_status = res.solver.status
+        self.solver_termination_condition = res.solver.termination_condition
+
+        # ✅ Check if the solver found a feasible solution
+        if self.solver_termination_condition in ["optimal", "locally optimal", "feasible"]:
+            self.Solution()
+            self.Compute()
+        else:
+            print(f"WARNING: Solver returned infeasible solution for {self.inputs.get('itinerary_id', 'unknown')}")
+
+    def Build(self):
+
+        # Pulling the keys from the inputs dict
+        keys = self.inputs.keys()
+        # Initializing the model as a concrete model
+        self.model = pyomo.ConcreteModel(name="EVCSP_Model")
+        # Adding variables
+        self.Variables()
+        # Upper-level objective (inconvenience)
+        self.UpperObjective()  # New
+        # Lower-level KKT conditions for cost minimization
+        # self.LowerKKT()
+        self.ChargingConstraints()  # ✅ New function for constraints
+        # Bounds constraints
+        self.Bounds()
+        # Unit commitment constraints
+        # self.Unit_Commitment()
+
+    def Variables(self):
+        # **Define event set**
+        self.model.E = pyomo.Set(initialize=range(self.inputs['n_e']))
+        # **Minute-based resolution**
+        EM = [(e, h) for e in range(self.inputs['n_e']) for h in self.inputs['valid_hours'][e]]
+        self.model.EM = pyomo.Set(initialize=EM, dimen=2)
+
+        # **Charging rate decision variables**
+        self.model.x_d = pyomo.Var(self.model.EM, domain=pyomo.NonNegativeReals)
+        self.model.x_a = pyomo.Var(self.model.EM, domain=pyomo.NonNegativeReals, bounds=(0, self.inputs['r_a']))
+
+        # **Emergency Charging
+        self.model.x_a_nec = pyomo.Var(self.model.E, domain=pyomo.NonNegativeReals, bounds=(0, self.inputs['r_a']))
+
+        # **Charging duration decision variable**
+        self.model.tdu_e = pyomo.Var(self.model.E, domain=pyomo.NonNegativeReals)
+        self.model.tau_e = pyomo.Var(self.model.E, domain=pyomo.NonNegativeReals)
+
+        self.model.u_db = pyomo.Var(self.model.E, domain=pyomo.Boolean)
+        self.model.u_ab = pyomo.Var(self.model.E, domain=pyomo.Boolean,  initialize=1)
+
+    def UpperObjective(self):
+
+        destination_charge_cost = sum(
+            self.inputs['residential_rate'][h] * self.model.x_d[e, h] for e, h in self.model.EM if self.inputs['is_home'][e]
+        ) + sum(
+            self.inputs['commercial_rate'][h] * self.model.x_d[e, h] for e, h in self.model.EM if self.inputs['is_work'][e]
+        ) + sum(
+            self.inputs['other_rate'] * self.model.x_d[e, h] for e, h in self.model.EM if self.inputs['is_other'][e]
+        )
+
+        ad_hoc_charge_cost = sum(
+            self.inputs['other_rate'] * self.model.x_a[e, h] for e, h in self.model.EM
+        )
+
+        destination_charge_duration = sum(
+            self.inputs['c_dd'][e] * self.model.tdu_e[e] * self.inputs['wtp'][e] for e in self.model.E
+        ) if any(self.inputs['c_dd']) else 0
+
+        ad_hoc_charge_duration = sum(
+            self.inputs['c_ad'][e] * self.model.tau_e[e] * self.inputs['wtp'][e] for e in self.model.E
+        ) if any(self.inputs['c_ad']) else 0
+
+        destination_charge_event = sum(
+                 self.inputs['c_db'][e] * self.model.u_db[e] * self.inputs['wtp'][e] for e in self.model.E)
+
+        ad_hoc_charge_event = sum(
+                 self.inputs['c_ab'][e] * self.model.u_ab[e] * self.inputs['wtp'][e] for e in self.model.E)
+
+        self.model.objective = pyomo.Objective(
+            expr=
+            ad_hoc_charge_event +
+            destination_charge_event +
+            destination_charge_cost +
+            ad_hoc_charge_cost +
+            destination_charge_duration +
+            ad_hoc_charge_duration,
+            sense=pyomo.minimize
+        )
+
+        self.model.objective.expr += sum(100 * 1e200 * self.model.x_a_nec[e] for e in self.model.E)
+
+    def ChargingConstraints(self):
+        model = self.model
+
+        # Ensure valid_hours is correctly formatted as lists
+        for e in range(self.inputs['n_e']):
+            if not isinstance(self.inputs['valid_hours'][e], list):
+                print(f"⚠️ WARNING: Fixing valid_hours[{e}] (was {self.inputs['valid_hours'][e]})")
+                self.inputs['valid_hours'][e] = [int(self.inputs['valid_hours'][e])]  # Convert to list
+
+        # Destination charging constraint
+        def sum_xd_rule(m, e):
+            r_dest = (
+                self.inputs['r_d_h'] if self.inputs['is_home'][e] else
+                self.inputs['r_d_w'] if self.inputs['is_work'][e] else
+                self.inputs['r_d_o'] if self.inputs['is_other'][e] else 0
+            )
+            return sum(m.x_d[e, h] for h in self.inputs['valid_hours'][e]) == m.tdu_e[e] * r_dest
+
+        model.sum_xd_con = pyomo.Constraint(model.E, rule=sum_xd_rule)
+
+        # Ad-hoc charging constraint
+        def sum_xa_rule(m, e):
+            return sum(m.x_a[e, h] for h in self.inputs['valid_hours'][e]) == m.tau_e[e] * self.inputs['r_a']
+
+        model.sum_xa_con = pyomo.Constraint(model.E, rule=sum_xa_rule)
+
+        # Maximum charging rate constraints
+        def xd_max_rule(m, e, h):
+            r_dest = (
+                self.inputs['r_d_h'] if self.inputs['is_home'][e] else
+                self.inputs['r_d_w'] if self.inputs['is_work'][e] else
+                self.inputs['r_d_o'] if self.inputs['is_other'][e] else 0
+            )
+            return m.x_d[e, h] <= r_dest * self.model.u_db[e]
+
+        model.xd_max_con = pyomo.Constraint(model.EM, rule=xd_max_rule)
+
+        def xa_max_rule(m, e, h):
+            return m.x_a[e, h] <= self.inputs['r_a'] * self.model.u_ab[e]
+
+        model.xa_max_con = pyomo.Constraint(model.EM, rule=xa_max_rule)
+
+    def Unit_Commitment(self):
+        model = self.model
+        # Create a ConstraintList for unit commitment constraints
+        model.unit_commitment = pyomo.ConstraintList()
+
+        # 2️⃣ Link Duration Variables (`tdu_e`, `tau_e`) to Charging Decisions
+        for e in model.E:
+            model.unit_commitment.add(
+                self.inputs['d_e_min'][e] * self.model.u_db[e] <= self.model.tdu_e[e]  # Min duration for destination
+            )
+            model.unit_commitment.add(
+                self.inputs['d_e_max'][e] * self.model.u_db[e] >= self.model.tdu_e[e]  # Max duration for destination
+            )
+
+            model.unit_commitment.add(
+                self.inputs['a_e_min'][e] * self.model.u_ab[e] <= self.model.tau_e[e]  # Min duration for ad-hoc
+            )
+            model.unit_commitment.add(
+                self.inputs['a_e_max'][e] * self.model.u_ab[e] >= self.model.tau_e[e]  # Max duration for ad-hoc
+            )
+
+    def Bounds(self):
+        model = self.model
+
+        # Create a ConstraintList to store SOC constraints
+        model.bounds = pyomo.ConstraintList()
+
+        # Define SOC Variables (still in Joules)
+        model.ess_state = pyomo.Var(
+            model.E, domain=pyomo.NonNegativeReals,
+            bounds=(self.inputs['s_lb'], self.inputs['s_ub'])
+        )
+        model.soc_after_trip = pyomo.Var(
+            model.E, domain=pyomo.NonNegativeReals,
+            bounds=(self.inputs['s_lb'], self.inputs['s_ub'])
+        )
+
+        # Upper-Level Charging Duration Constraints
+        for e in model.E:
+            if e == self.inputs['n_e'] - 1:
+                # Last event: No upper bounds on charging duration
+                # print(f"Relaxing bounds for last event: {e}")
+                continue  # Skip bounds for the last event
+
+            # Adjust Charging Window for Ad-Hoc Travel Time Loss (minutes)
+            travel_time_loss = self.inputs['ad_hoc_travel_time_loss']
+            adjusted_time = max(self.inputs['d_e_max'][e] - 2 * travel_time_loss, 0)
+            model.bounds.add(model.tau_e[e] <= adjusted_time)
+
+        # First handle the SOC after each trip (in Joules)
+        for e in model.E:
+
+            if e == 0:
+                model.bounds.add(
+                    model.soc_after_trip[e] == self.inputs['s_i'] - self.inputs['d'][e]
+                )
+            else:
+                model.bounds.add(
+                    model.soc_after_trip[e] == model.ess_state[e - 1] - self.inputs['d'][e]
+                )
+
+        # Now link ess_state[e] to soc_after_trip[e] + sum of charging (Joules)
+        for e in model.E:
+            # Summation over all valid hours for event e
+            model.bounds.add(
+                model.ess_state[e] ==
+                model.soc_after_trip[e] +
+                sum(model.x_d[e, h] + model.x_a[e, h] for h in self.inputs['valid_hours'][e]) + model.x_a_nec[e]
+            )
+
+        # Final SOC Must Meet Required Final SOC (still in Joules)
+        # model.bounds.add(
+        #     model.ess_state[self.inputs['n_e'] - 1] >= self.inputs['s_f']
+        # )
+
+    def Solution(self):
+        model_vars = self.model.component_map(ctype=pyomo.Var)
+        serieses = []  # Collection to hold the converted series
+
+        for k, v in model_vars.items():  # Loop over model variables
+            values = v.extract_values()  # Extract solution values
+
+            #  Skip empty variables
+            if not values:
+                print(f"WARNING: Variable '{k}' has no values. Skipping.")
+                continue
+
+            # Convert values to a Pandas Series
+            s = pd.Series(values, index=values.keys())
+
+            # If multi-indexed (i.e., tuple keys), reshape appropriately
+            if isinstance(s.index[0], tuple):
+                s = s.unstack(level=1)  # Reshape for readability
+            else:
+                s = pd.DataFrame(s)  # Convert Series to DataFrame for consistency
+
+            # Assign proper column names
+            s.columns = pd.MultiIndex.from_tuples([(k, t) for t in s.columns])
+            serieses.append(s)
+
+        # Combine all extracted values into a single DataFrame
+        # self.solution = pd.concat(serieses, axis=1)
+         # Combine all extracted values into a single DataFrame
+        if serieses:  # ✅ Check if any non-empty variables are found
+            self.solution = pd.concat(serieses, axis=1)
+        else:
+            print("WARNING: No variables had values. Solution is empty.")
+            self.solution = pd.DataFrame()  # Return an empty DataFrame
+
+    def Compute(self):
+
+        # Extract SOC values
+        soc_values = []
+        energy_values = []
+        soc_after_trip_values = []
+
+        for e in self.model.E:
+            # Get SOC after charging
+            soc_e = pyomo.value(self.model.ess_state[e]) if self.model.ess_state[e].value is not None else np.nan
+            energy = pyomo.value(self.model.x_a_nec[e]) if self.model.x_a_nec[e].value is not None else np.nan
+            soc_values.append(soc_e / self.inputs['b_c'])
+            energy_values.append(energy)
+            # Get SOC after trip
+            soc_trip = pyomo.value(self.model.soc_after_trip[e]) if self.model.soc_after_trip[e].value is not None else np.nan
+            soc_after_trip_values.append(soc_trip / self.inputs['b_c'])
+
+
+        # Prepend initial SOC
+        soc = np.insert(soc_values, 0, self.inputs['s_i'] / self.inputs['b_c'])
+
+        # Store SOC in solution
+        self.solution["soc", 0] = soc[1:]  # SOC after charging
+        self.solution["ad_hoc_energy", 0] = energy_values  # SOC after charging
+        self.solution["soc_start_trip", 0] = soc[:-1]  # SOC before the trip
+        self.solution["soc_end_trip", 0] = soc_after_trip_values  # SOC after trip
+
+        # Compute "inconvenience" metric (SIC)
+        total_inconvenience = 0.0
+        for e in self.model.E:
+            # if pyomo.value(self.model.u_db[e]) > 0:
+                penalty_e = self.inputs['c_db'][e] if self.inputs['is_other'][e] else 0.0
+                for h in self.inputs['valid_hours'][e]:
+                    if (e, h) not in self.model.EM:
+                        continue
+                    xd_val = pyomo.value(self.model.x_d[e, h])
+                    total_inconvenience += penalty_e * xd_val
+
+        self.sic = (total_inconvenience / 60) / (self.inputs['l_i'] / 1e3)
+
+        # Compute charging details
+        charging_costs = []
+        charging_kwh_total = []
+        charging_start_times = []
+        charging_end_times = []
+        hour_charging_details = []
+
+        # Improved Charging Tracking with Tuple as Key
+        for e in self.model.E:
+            total_energy_kw_h = 0.0
+            total_cost_e = 0.0
+            hour_charging = defaultdict(float)  # Use defaultdict to track hourly charging
+
+            max_power_kw_per_hour = self.inputs['r_d_h'] * 2.7778e-7 if self.inputs['is_home'][e] else (
+                self.inputs['r_d_w'] * 2.7778e-7 if self.inputs['is_work'][e] else (
+                    self.inputs['r_d_o'] * 2.7778e-7 if self.inputs['is_other'][e] else self.inputs['r_a']))
+
+            for h in self.inputs['valid_hours'][e]:
+                if (e, h) not in self.model.EM:
+                    continue
+                # Extract charging power at hour h
+                xd_val = pyomo.value(self.model.x_d[e, h]) if self.model.x_d[e, h].value is not None else 0.0
+                xa_val = pyomo.value(self.model.x_a[e, h]) if self.model.x_a[e, h].value is not None else 0.0
+                event_energy_kw_h = (xd_val + xa_val) * 2.7778e-7  # Stay in Joules, convert to kWh correctly
+
+                if event_energy_kw_h > 1e-9:
+                    # Convert hour_of_year to (day_of_week, hour_of_day)
+                    day_of_week = (h // 24) % 7  # 0 = Monday, ..., 6 = Sunday
+                    hour_of_day = h % 24
+                    hour_charging[(day_of_week, hour_of_day)] += event_energy_kw_h
+
+                # Get correct rate per hour
+                if isinstance(self.inputs['residential_rate'], list):
+                    res_rate = self.inputs['residential_rate'][min(h, 8759)]
+                    com_rate = self.inputs['commercial_rate'][min(h, 8759)]
+                else:
+                    res_rate = self.inputs['residential_rate']
+                    com_rate = self.inputs['commercial_rate']
+
+                rate = res_rate if self.inputs['is_home'][e] else (
+                    com_rate if self.inputs['is_work'][e] else self.inputs['other_rate'])
+
+                total_cost_e += event_energy_kw_h * rate
+
+            # Store charging details
+            charging_kwh_total.append(sum(hour_charging.values()))
+            charging_costs.append(total_cost_e)
+            hour_charging_details.append(dict(hour_charging))  # Convert defaultdict to normal dict
+
+            # Corrected Start and End Times using Tuple Keys
+            if hour_charging:
+                start_time = min(hour_charging.keys())  # (day_of_week, hour_of_day)
+                end_time = max(hour_charging.keys())  # (day_of_week, hour_of_day)
+
+                charging_start_times.append(start_time)
+                charging_end_times.append(end_time)
+            else:
+                charging_start_times.append(np.nan)
+                charging_end_times.append(np.nan)
+
+        # Store final results
+        self.solution["charging_kwh_total", 0] = pd.Series(charging_kwh_total).reindex(self.solution.index).tolist()
+        self.solution["charging_cost", 0] = pd.Series(charging_costs).reindex(self.solution.index).tolist()
+        self.solution["charging_start_time", 0] = pd.Series(charging_start_times).reindex(self.solution.index).tolist()
+        self.solution["charging_end_time", 0] = pd.Series(charging_end_times).reindex(self.solution.index).tolist()
+        self.solution["hour_charging_details", 0] = pd.Series(hour_charging_details).reindex(self.solution.index).tolist()
