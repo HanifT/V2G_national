@@ -22,7 +22,8 @@ from mud import get_charger_likelihood_by_state
 import tqdm
 from datetime import datetime, timedelta
 from charger_rate import ChargerDataProcessor
-
+from joblib import Parallel, delayed
+import multiprocessing
 
 class TimeoutException(Exception): pass
 
@@ -648,6 +649,198 @@ def charging_pipeline(final_df, days=None, delay_charging=False):
     final_df_days["Charged_Energy"].fillna(0, inplace=True)
     return final_df_days, weekly_demand_curve
 
+#
+# def generate_itineraries(states="CA", electricity_price_file="electricity_prices.json", state_name=None, itinerary_kwargs=None, r=None, c=None, o=None):
+#     # Load electricity price data from JSON
+#     with open(electricity_price_file, 'r') as f:
+#         electricity_prices = json.load(f)  # Nested dictionary with state and hourly prices
+#     itineraries_total = load_itineraries(state=states)
+#
+#     def flatten_itineraries(itineraries_list):
+#         combined_df = pd.concat([itinerary["trips"] for itinerary in itineraries_list], ignore_index=True)
+#         return combined_df
+#
+#     flattened_itineraries = flatten_itineraries(itineraries_total).reset_index(drop=True)
+#     flattened_itineraries = flattened_itineraries.sort_values(by=["NHOUSEID_n", "Day", "STRTTIME"], ascending=True).reset_index(drop=True)
+#     flattened_itineraries_ver1 = flattened_itineraries.groupby(['NHOUSEID_n'], group_keys=False).apply(lambda g: g.reset_index(drop=True).pipe(update_dwell_time))
+#     itineraries = generate_itinerary_dicts(flattened_itineraries_ver1)
+#
+#     battery_capacities = [80,  # Model Y 0.256
+#                           57,  # Model 3 0.176
+#                           60,  # Model 3 0.059
+#                           85,  # Model S 0.052
+#                           100,  # Model X 0.038
+#                           65,  # Bolt 0.031
+#                           65,  # Nissan Leaf 0.026
+#                           70,  # Mustang Mach e  0.023
+#                           63,  # Hyundai Ioniq 5 BEV 0.019
+#                           65,  # Nissan Leaf 0.026
+#                           75]  # Rest 30%
+#     probabilities = [0.256, 0.176, 0.059, 0.052, 0.038, 0.031, 0.026, 0.0233, 0.019, 0.017, 0.3027]
+#     battery_seed = 123
+#     battery_rng = np.random.default_rng(battery_seed)
+#
+#     # Define a function to select a battery capacity based on the given probabilities
+#     def get_random_battery_capacity(battery_capacities, probabilities):
+#         return battery_rng.choice(battery_capacities, p=probabilities)
+#
+#     state = itineraries[0]["trips"]["HHSTATE"].iloc[0]
+#
+#     # Get electricity price for the state (e.g., residential rate)
+#     state_full_name = state_name.get(state, None)
+#     if state_full_name is None:
+#         raise ValueError(f"State abbreviation {state} not found in mapping.")
+#
+#     # Load the price
+#     rates = electricity_prices.get(state_full_name, {})
+#
+#     # Ensure we correctly extract the nested dictionary
+#     residential_rate_dict = rates.get("Residential", {}).get("rate", {})
+#     commercial_rate_dict = rates.get("Commercial", {}).get("rate", {})
+#
+#     # Convert to float and ensure all hours are covered
+#     residential_rate = [float(residential_rate_dict.get(str(hour), 0.0)) / r if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0 for hour in range(8760)]
+#     commercial_rate = [float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0 for hour in range(8760)]
+#     other_rate = 0.5 / o  # Fixed rate for "other"
+#
+#     processor = ChargerDataProcessor()
+#     public_charger_df = processor.compute_public_charger_rate()[["State", "charger_station_dc_ratio", "charger_station_l_ratio"]]
+#     home_charger_df = get_charger_likelihood_by_state(year=2022)
+#
+#     try:
+#         home_charger_likelihood = home_charger_df.loc[home_charger_df["NAME"] == state_full_name, "charger_likelihood"].values[0]
+#         dest_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_dc_ratio"].values[0]
+#         work_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_l_ratio"].values[0]
+#     except IndexError:
+#         raise ValueError(f"Charger likelihood data not found for state: {state_full_name}")
+#     # Initialize an empty list to collect the results
+#     all_tailed_itineraries = []
+#
+#     # Solver and itinerary parameters
+#     solver_kwargs = {'_name': 'gurobi'}
+#
+#     # Loop over each itinerary in the list
+#     for n, itinerary in enumerate(itineraries):
+#         # Select a battery capacity based on the defined distribution
+#         selected_battery_capacity = get_random_battery_capacity(battery_capacities, probabilities)
+#         selected_energy_consumption = itinerary["trips"]["Energy_Consumption"].mean() / 1609  # kWh/meter # * 2236.94 # kWh/mile to joule/meter
+#         rng = np.random.default_rng(seed=123)
+#         first_trip_energy = itinerary["trips"]['TRPMILES'].iloc[0] * 1609.34 * selected_energy_consumption
+#         min_required_soc = first_trip_energy / selected_battery_capacity
+#         soc_random = rng.uniform(0.3, 1)
+#         buffer = 0.1
+#         initial_soc = max(soc_random, min_required_soc + buffer)  # e.g., buffer = 0.05
+#
+#         # Only add default values if they weren't already passed in
+#         defaults = {
+#             "tiles": 1,
+#             'initial_soc': initial_soc,
+#             'final_soc': initial_soc,
+#             'home_charger_likelihood': home_charger_likelihood,
+#             'work_charger_likelihood': work_charger_likelihood,
+#             'destination_charger_likelihood': dest_charger_likelihood,
+#             'midnight_charging_prob': 0,
+#             "consumption": selected_energy_consumption,
+#             'home_charger_power': 6.6,
+#             'work_charger_power': 7.2,
+#             'destination_charger_power': 100.1,
+#             "ad_hoc_charger_power": 100.1,
+#             'max_soc': 1,
+#             'min_soc': 0.1,
+#             'min_dwell_event_duration': 0,
+#             'max_ad_hoc_event_duration': 2,
+#             'min_ad_hoc_event_duration': 0,
+#             'payment_penalty': 1,
+#             'time_penalty': 1,
+#             'travel_penalty': 1,
+#             "dwell_charge_time_penalty": 0,
+#             "ad_hoc_charge_time_penalty": 15,
+#             'battery_capacity': selected_battery_capacity,
+#             'residential_rate': residential_rate,
+#             'commercial_rate': commercial_rate,
+#             'other_rate': other_rate,
+#             'home_penalty': 0.0,
+#             'work_penalty': 0.1,
+#             'other_penalty': 0.2,
+#             'ad_hoc_penalty': 1.0,
+#         }
+#
+#         # Always let user-supplied kwargs override defaults
+#         itinerary_kwargs_local = {**defaults, **(itinerary_kwargs or {})}
+#
+#         # Instantiate the EVCSP class for each itinerary
+#         problem = optimization_backup.EVCSP_delay(itinerary, itinerary_kwargs=itinerary_kwargs_local)
+#         problem.Solve(solver_kwargs)
+#
+#         # Print status and SIC for tracking
+#         print(f'Itinerary {n}: HHID - {itinerary["trips"]["NHOUSEID_n"].iloc[0]}')
+#         print(f'Itinerary {n}: solver status - {problem.solver_status}, termination condition - {problem.solver_termination_condition}')
+#         print(f'Itinerary {n}: SIC - {problem.sic}')
+#
+#         # Repeat (tail) the itinerary across tiles
+#         # tailed_itinerary = pd.concat([itineraries[n]['trips']] * tile, ignore_index=True)
+#         original_columns = itinerary['trips'].columns
+#         tailed_itinerary = pd.concat([itinerary['trips'][original_columns]], ignore_index=True)
+#
+#         # Add the SOC from the solution to the tailed itinerary
+#         soc_values = problem.solution.loc[:, ("soc", 0)].values
+#         tailed_itinerary['SOC'] = soc_values[:len(tailed_itinerary)]
+#
+#         num_trips = len(tailed_itinerary)
+#
+#         tailed_itinerary['itineraries'] = n
+#         trip_start_values = problem.solution.loc[:, ("soc_start_trip", 0)].values
+#         trip_end_values = problem.solution.loc[:, ("soc_end_trip", 0)].values
+#
+#         # Then slice to the itinerary length (or however many events/trips you want):
+#         tailed_itinerary['SOC_Trip_start'] = trip_start_values[:len(tailed_itinerary)]
+#         tailed_itinerary['SOC_Trip_end'] = trip_end_values[:len(tailed_itinerary)]
+#
+#         tailed_itinerary['SIC'] = problem.sic
+#         tailed_itinerary['Charging_cost'] = problem.solution.get('charging_cost', np.nan)[:num_trips]
+#         tailed_itinerary['Charging_kwh'] = problem.solution.get('charging_kwh_total', np.nan)[:num_trips]
+#         tailed_itinerary['Battery Capacity'] = selected_battery_capacity
+#
+#         # Store them in the tailed_itinerary DataFrame
+#         tailed_itinerary['Charging_Start_Time'] = problem.solution.get('charging_start_time', np.nan)[:num_trips]
+#         tailed_itinerary['Charging_End_Time'] = problem.solution.get('charging_end_time', np.nan)[:num_trips]
+#         tailed_itinerary['Charging_kwh_distribution'] = problem.solution.get('hour_charging_details', np.nan)[:num_trips]
+#
+#         # # Append the tailed itinerary to the results list
+#         # all_tailed_itineraries.append(tailed_itinerary)
+#
+#         # Initialize the new columns with NaN
+#         tailed_itinerary['SOC_charging_start'] = np.nan
+#         tailed_itinerary['SOC_charging_end'] = np.nan
+#
+#         # Build a mask for rows where charging occurs (start time is not NaN)
+#         mask_charging = (tailed_itinerary['Charging_Start_Time'] != 9999)
+#
+#         # 4) For rows with charging:
+#         #    - SOC_charging_end = SOC_Trip_end (final SOC after the charge)
+#         #    - SOC_charging_start = (SOC_Trip_start - trip fraction),
+#         #      i.e., battery fraction immediately after the trip but before charging.
+#         tailed_itinerary['SOC_charging_end'] = np.nan
+#         tailed_itinerary.loc[mask_charging, 'SOC_charging_end'] = \
+#             tailed_itinerary.loc[mask_charging, 'SOC']
+#
+#         tailed_itinerary['SOC_charging_start'] = np.nan
+#         tailed_itinerary.loc[mask_charging, 'SOC_charging_start'] = \
+#             tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
+#
+#         tailed_itinerary.loc[mask_charging, 'SOC_Trip_end'] = \
+#             tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
+#
+#         # Append the tailed itinerary to the results list
+#         all_tailed_itineraries.append(tailed_itinerary)
+#
+#         # Concatenate all the individual DataFrames into one final DataFrame
+#     final_df = pd.concat(all_tailed_itineraries, ignore_index=True)
+#     final_df.name = f"final_df_{'_'.join(states)}"
+#     final_df['TripOrder'] = final_df.groupby('HOUSEID').cumcount() + 1
+#     final_df.drop(["Battery Capacity"], axis=1, inplace=True)
+#     return final_df
+
 
 def generate_itineraries(states="CA", electricity_price_file="electricity_prices.json", state_name=None, itinerary_kwargs=None, r=None, c=None, o=None):
     # Load electricity price data from JSON
@@ -718,19 +911,20 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
     # Solver and itinerary parameters
     solver_kwargs = {'_name': 'gurobi'}
 
-    # Loop over each itinerary in the list
-    for n, itinerary in enumerate(itineraries):
-        # Select a battery capacity based on the defined distribution
+    # Define a function that encapsulates the per-itinerary logic
+    def run_itinerary(n, itinerary, itinerary_kwargs, battery_capacities, probabilities,
+                      home_charger_likelihood, work_charger_likelihood, dest_charger_likelihood,
+                      residential_rate, commercial_rate, other_rate, solver_kwargs):
+
         selected_battery_capacity = get_random_battery_capacity(battery_capacities, probabilities)
-        selected_energy_consumption = itinerary["trips"]["Energy_Consumption"].mean() / 1609  # kWh/meter # * 2236.94 # kWh/mile to joule/meter
+        selected_energy_consumption = itinerary["trips"]["Energy_Consumption"].mean() / 1609
         rng = np.random.default_rng(seed=123)
         first_trip_energy = itinerary["trips"]['TRPMILES'].iloc[0] * 1609.34 * selected_energy_consumption
         min_required_soc = first_trip_energy / selected_battery_capacity
         soc_random = rng.uniform(0.3, 1)
         buffer = 0.1
-        initial_soc = max(soc_random, min_required_soc + buffer)  # e.g., buffer = 0.05
+        initial_soc = max(soc_random, min_required_soc + buffer)
 
-        # Only add default values if they weren't already passed in
         defaults = {
             "tiles": 1,
             'initial_soc': initial_soc,
@@ -763,83 +957,52 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
             'other_penalty': 0.2,
             'ad_hoc_penalty': 1.0,
         }
-
-        # Always let user-supplied kwargs override defaults
         itinerary_kwargs_local = {**defaults, **(itinerary_kwargs or {})}
 
-        # Instantiate the EVCSP class for each itinerary
         problem = optimization_backup.EVCSP_delay(itinerary, itinerary_kwargs=itinerary_kwargs_local)
         problem.Solve(solver_kwargs)
 
-        # Print status and SIC for tracking
         print(f'Itinerary {n}: HHID - {itinerary["trips"]["NHOUSEID_n"].iloc[0]}')
         print(f'Itinerary {n}: solver status - {problem.solver_status}, termination condition - {problem.solver_termination_condition}')
         print(f'Itinerary {n}: SIC - {problem.sic}')
 
-        # Repeat (tail) the itinerary across tiles
-        # tailed_itinerary = pd.concat([itineraries[n]['trips']] * tile, ignore_index=True)
-        original_columns = itinerary['trips'].columns
-        tailed_itinerary = pd.concat([itinerary['trips'][original_columns]], ignore_index=True)
-
-        # Add the SOC from the solution to the tailed itinerary
+        tailed_itinerary = pd.concat([itinerary['trips']], ignore_index=True)
         soc_values = problem.solution.loc[:, ("soc", 0)].values
-        tailed_itinerary['SOC'] = soc_values[:len(tailed_itinerary)]
-
         num_trips = len(tailed_itinerary)
 
+        tailed_itinerary['SOC'] = soc_values[:num_trips]
         tailed_itinerary['itineraries'] = n
-        trip_start_values = problem.solution.loc[:, ("soc_start_trip", 0)].values
-        trip_end_values = problem.solution.loc[:, ("soc_end_trip", 0)].values
-
-        # Then slice to the itinerary length (or however many events/trips you want):
-        tailed_itinerary['SOC_Trip_start'] = trip_start_values[:len(tailed_itinerary)]
-        tailed_itinerary['SOC_Trip_end'] = trip_end_values[:len(tailed_itinerary)]
-
+        tailed_itinerary['SOC_Trip_start'] = problem.solution.loc[:, ("soc_start_trip", 0)].values[:num_trips]
+        tailed_itinerary['SOC_Trip_end'] = problem.solution.loc[:, ("soc_end_trip", 0)].values[:num_trips]
         tailed_itinerary['SIC'] = problem.sic
         tailed_itinerary['Charging_cost'] = problem.solution.get('charging_cost', np.nan)[:num_trips]
         tailed_itinerary['Charging_kwh'] = problem.solution.get('charging_kwh_total', np.nan)[:num_trips]
         tailed_itinerary['Battery Capacity'] = selected_battery_capacity
-
-        # Store them in the tailed_itinerary DataFrame
         tailed_itinerary['Charging_Start_Time'] = problem.solution.get('charging_start_time', np.nan)[:num_trips]
         tailed_itinerary['Charging_End_Time'] = problem.solution.get('charging_end_time', np.nan)[:num_trips]
         tailed_itinerary['Charging_kwh_distribution'] = problem.solution.get('hour_charging_details', np.nan)[:num_trips]
-
-        # # Append the tailed itinerary to the results list
-        # all_tailed_itineraries.append(tailed_itinerary)
-
-        # Initialize the new columns with NaN
         tailed_itinerary['SOC_charging_start'] = np.nan
         tailed_itinerary['SOC_charging_end'] = np.nan
 
-        # Build a mask for rows where charging occurs (start time is not NaN)
         mask_charging = (tailed_itinerary['Charging_Start_Time'] != 9999)
+        tailed_itinerary.loc[mask_charging, 'SOC_charging_end'] = tailed_itinerary.loc[mask_charging, 'SOC']
+        tailed_itinerary.loc[mask_charging, 'SOC_charging_start'] = tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
+        return tailed_itinerary
 
-        # 4) For rows with charging:
-        #    - SOC_charging_end = SOC_Trip_end (final SOC after the charge)
-        #    - SOC_charging_start = (SOC_Trip_start - trip fraction),
-        #      i.e., battery fraction immediately after the trip but before charging.
-        tailed_itinerary['SOC_charging_end'] = np.nan
-        tailed_itinerary.loc[mask_charging, 'SOC_charging_end'] = \
-            tailed_itinerary.loc[mask_charging, 'SOC']
+    # Parallel execution
+    results = Parallel(n_jobs=multiprocessing.cpu_count())(
+        delayed(run_itinerary)(
+            n, itinerary, itinerary_kwargs, battery_capacities, probabilities,
+            home_charger_likelihood, work_charger_likelihood, dest_charger_likelihood,
+            residential_rate, commercial_rate, other_rate, solver_kwargs
+        )
+        for n, itinerary in enumerate(itineraries)
+    )
 
-        tailed_itinerary['SOC_charging_start'] = np.nan
-        tailed_itinerary.loc[mask_charging, 'SOC_charging_start'] = \
-            tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
-
-        tailed_itinerary.loc[mask_charging, 'SOC_Trip_end'] = \
-            tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
-
-        # Append the tailed itinerary to the results list
-        all_tailed_itineraries.append(tailed_itinerary)
-
-        # Concatenate all the individual DataFrames into one final DataFrame
-    final_df = pd.concat(all_tailed_itineraries, ignore_index=True)
-    final_df.name = f"final_df_{'_'.join(states)}"
+    final_df = pd.concat(results, ignore_index=True)
     final_df['TripOrder'] = final_df.groupby('HOUSEID').cumcount() + 1
-    final_df.drop(["Battery Capacity"], axis=1, inplace=True)
+    final_df.drop("Battery Capacity", axis=1, inplace=True)
     return final_df
-
 
 def generate_itineraries_for_selected_states(
         state_counts=None,

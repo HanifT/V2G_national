@@ -27,17 +27,17 @@ os.makedirs(output_dir, exist_ok=True)
 # %% Define selected states (the ones you want to run first)
 selected_states = [
     "DC",
-    # "NV",
-    # "AR",
-    # "MS", "WV",
+    "NV",
+    "AR",
+    "MS", "WV",
     # "CT", "NM", "LA", "RI", "WY", "DE", "ND",
     # "KS", "NH", "KY", "NE", "ME", "AL", "MT", "SD", "ID", "UT", "VT", "OR",
     # "TN", "MA", "CO", "MO", "IN", "NJ", "WA", "MN", "VA", "MI", "IL", "PA",
     # "OH", "OK", "FL", "MD", "AZ", "IA", "SC",
-#     "GA", "NC", "WI",
-#     "NY",
-#     "CA",
-#     "TX"
+    "GA", "NC", "WI",
+    "NY",
+    "CA",
+    "TX"
 ]
 
 # %%
@@ -99,7 +99,7 @@ utilities.run_simulation(selected_states_input=selected_states,
                          state_abbrev_to_name=state_abbrev_to_name,
                          output_dir=output_dir1,
                          itinerary_kwargs=itinerary_kwargs,
-                         r=1, c=0.1, o=0.1)
+                         r=1, c=0.9, o=0.9)
 
 output_dir2 = "D:\\Hanif\\V2G_national\\results\\state_itineraries_cheapW"  # cheaper work charging
 itinerary_kwargs = {
@@ -119,7 +119,7 @@ utilities.run_simulation(selected_states_input=selected_states,
                          state_abbrev_to_name=state_abbrev_to_name,
                          output_dir=output_dir2,
                          itinerary_kwargs=itinerary_kwargs,
-                         r=0.1, c=1, o=0.1)
+                         r=0.9, c=1, o=0.9)
 
 output_dir3 = "D:\\Hanif\\V2G_national\\results\\state_itineraries_cheapO"  # cheaper other charging
 itinerary_kwargs = {
@@ -139,7 +139,7 @@ utilities.run_simulation(selected_states_input=selected_states,
                          state_abbrev_to_name=state_abbrev_to_name,
                          output_dir=output_dir3,
                          itinerary_kwargs=itinerary_kwargs,
-                         r=0.01, c=0.01, o=1)
+                         r=0.9, c=0.9, o=1)
 
 output_dir4 = "D:\\Hanif\\V2G_national\\results\\state_itineraries_100H_6.6"  # normal price, 100 access H 6kw
 itinerary_kwargs = {
@@ -384,8 +384,8 @@ output_dirs = [
     # output_dir_base,
     output_dir0,
     output_dir1,
-    output_dir2,
-    output_dir3,
+    # output_dir2,
+    # output_dir3,
     # output_dir4, output_dir5, output_dir6,
     # output_dir7, output_dir8, output_dir9,
     # output_dir10, output_dir11, output_dir12,
