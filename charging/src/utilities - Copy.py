@@ -22,8 +22,11 @@ from mud import get_charger_likelihood_by_state
 import tqdm
 from datetime import datetime, timedelta
 from charger_rate import ChargerDataProcessor
-
-
+from scipy.stats import variation  # Coefficient of variation
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import matplotlib.lines as mlines
+from scipy.stats import entropy
 class TimeoutException(Exception): pass
 
 
@@ -661,8 +664,20 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
 
     flattened_itineraries = flatten_itineraries(itineraries_total).reset_index(drop=True)
     flattened_itineraries = flattened_itineraries.sort_values(by=["NHOUSEID_n", "Day", "STRTTIME"], ascending=True).reset_index(drop=True)
+    # flattened_itineraries_ver1 = flattened_itineraries.groupby(['HOUSEID', 'VEHID', 'PERSONID'], group_keys=False).apply(update_dwell_time)
     flattened_itineraries_ver1 = flattened_itineraries.groupby(['NHOUSEID_n'], group_keys=False).apply(lambda g: g.reset_index(drop=True).pipe(update_dwell_time))
     itineraries = generate_itinerary_dicts(flattened_itineraries_ver1)
+
+    # battery_capacities = [80 * 3.6e6,
+    #                       55 * 3.6e6,
+    #                       66 * 3.6e6,
+    #                       65 * 3.6e6,
+    #                       62 * 3.6e6,
+    #                       75 * 3.6e6,
+    #                       135 * 3.6e6,
+    #                       60 * 3.6e6,
+    #                       70 * 3.6e6,
+    #                       80 * 3.6e6]
 
     battery_capacities = [80,  # Model Y 0.256
                           57,  # Model 3 0.176
@@ -676,65 +691,137 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
                           65,  # Nissan Leaf 0.026
                           75]  # Rest 30%
     probabilities = [0.256, 0.176, 0.059, 0.052, 0.038, 0.031, 0.026, 0.0233, 0.019, 0.017, 0.3027]
-    rng = np.random.default_rng(seed=123)
+    battery_seed = 123
+    battery_rng = np.random.default_rng(battery_seed)
 
     # Define a function to select a battery capacity based on the given probabilities
     def get_random_battery_capacity(battery_capacities, probabilities):
-        return rng.choice(battery_capacities, p=probabilities)
+        return battery_rng.choice(battery_capacities, p=probabilities)
 
-    state = itineraries[0]["trips"]["HHSTATE"].iloc[0]
-
-    # Get electricity price for the state (e.g., residential rate)
-    state_full_name = state_name.get(state, None)
-    if state_full_name is None:
-        raise ValueError(f"State abbreviation {state} not found in mapping.")
-
-    # Load the price
-    rates = electricity_prices.get(state_full_name, {})
-
-    # Ensure we correctly extract the nested dictionary
-    residential_rate_dict = rates.get("Residential", {}).get("rate", {})
-    commercial_rate_dict = rates.get("Commercial", {}).get("rate", {})
-
-    # Convert to float and ensure all hours are covered
-    residential_rate = [
-        float(residential_rate_dict.get(str(hour), 0.0)) / r if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0
-        for hour in range(8760)
-    ]
-
-    commercial_rate = [
-        float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0
-        for hour in range(8760)
-    ]
-    other_rate = 0.5 / o  # Fixed rate for "other"
-
-    processor = ChargerDataProcessor()
-    public_charger_df = processor.compute_public_charger_rate()[["State", "charger_station_dc_ratio", "charger_station_l_ratio"]]
-    home_charger_df = get_charger_likelihood_by_state(year=2022)
-    try:
-        home_charger_likelihood = home_charger_df.loc[home_charger_df["NAME"] == state_full_name, "charger_likelihood"].values[0]
-        dest_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_dc_ratio"].values[0]
-        work_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_l_ratio"].values[0]
-    except IndexError:
-        raise ValueError(f"Charger likelihood data not found for state: {state_full_name}")
     # Initialize an empty list to collect the results
     all_tailed_itineraries = []
 
     # Solver and itinerary parameters
     solver_kwargs = {'_name': 'gurobi'}
+    processor = ChargerDataProcessor()
+    public_charger_df = processor.compute_public_charger_rate()[["State", "charger_station_dc_ratio", "charger_station_l_ratio"]]
+    home_charger_df = get_charger_likelihood_by_state(year=2022)
 
+    # state = itineraries[0]["trips"]["HHSTATE"].iloc[0]
+    #
+    # # Get electricity price for the state (e.g., residential rate)
+    # state_full_name = state_name.get(state, None)
+    # if state_full_name is None:
+    #     raise ValueError(f"State abbreviation {state} not found in mapping.")
+    # print(state)
+    # print(state_full_name)
+    # # Load the price
+    # rates = electricity_prices.get(state_full_name, {})
+    #
+    # # Ensure we correctly extract the nested dictionary
+    # residential_rate_dict = rates.get("Residential", {}).get("rate", {})
+    # commercial_rate_dict = rates.get("Commercial", {}).get("rate", {})
+    #
+    # # Convert to float and ensure all hours are covered
+    # residential_rate = [
+    #     float(residential_rate_dict.get(str(hour), 0.0)) / r if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0
+    #     for hour in range(8760)
+    # ]
+    #
+    # commercial_rate = [
+    #     float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0
+    #     for hour in range(8760)
+    # ]
+    # other_rate = 0.5 / o  # Fixed rate for "other"
+    # try:
+    #     home_charger_likelihood = home_charger_df.loc[home_charger_df["NAME"] == state_full_name, "charger_likelihood"].values[0]
+    #     dest_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_dc_ratio"].values[0]
+    #     work_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_l_ratio"].values[0]
+    # except IndexError:
+    #     raise ValueError(f"Charger likelihood data not found for state: {state_full_name}")
     # Loop over each itinerary in the list
     for n, itinerary in enumerate(itineraries):
         # Select a battery capacity based on the defined distribution
         selected_battery_capacity = get_random_battery_capacity(battery_capacities, probabilities)
         selected_energy_consumption = itinerary["trips"]["Energy_Consumption"].mean() / 1609  # kWh/meter # * 2236.94 # kWh/mile to joule/meter
-        soc_random = rng.uniform(0.3, 1)
+        state = itinerary["trips"]["HHSTATE"].iloc[0]
 
+        # Get electricity price for the state (e.g., residential rate)
+        state_full_name = state_name.get(state, None)
+        if state_full_name is None:
+            raise ValueError(f"State abbreviation {state} not found in mapping.")
+
+        # Load the price
+        rates = electricity_prices.get(state_full_name, {})
+
+        # Ensure we correctly extract the nested dictionary
+        residential_rate_dict = rates.get("Residential", {}).get("rate", {})
+        commercial_rate_dict = rates.get("Commercial", {}).get("rate", {})
+
+        # Convert to float and ensure all hours are covered
+        residential_rate = [
+            float(residential_rate_dict.get(str(hour), 0.0)) / 0.1 if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0
+            for hour in range(8760)
+        ]
+
+        commercial_rate = [
+            float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0
+            for hour in range(8760)
+        ]
+        other_rate = 0.5 / o  # Fixed rate for "other"
+
+        try:
+            home_charger_likelihood = home_charger_df.loc[home_charger_df["NAME"] == state_full_name, "charger_likelihood"].values[0]
+            dest_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_dc_ratio"].values[0]
+            work_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_l_ratio"].values[0]
+        except IndexError:
+            raise ValueError(f"Charger likelihood data not found for state: {state_full_name}")
+        rng = np.random.default_rng(seed=123)
+
+        first_trip_energy = itinerary["trips"]['TRPMILES'].iloc[0] * 1609.34 * selected_energy_consumption
+        min_required_soc = first_trip_energy / selected_battery_capacity
+        soc_random = rng.uniform(0.3, 1)
+        buffer = 0.1
+        initial_soc = max(soc_random, min_required_soc + buffer)  # e.g., buffer = 0.05
+
+        # # Other parameters for the itineraries
+        # itinerary_kwargs_local.update({
+        #     "tiles": 1,
+        #     'initial_soc': soc_random,
+        #     'final_soc': soc_random,
+        #     'home_charger_likelihood': home_charger_likelihood,
+        #     'work_charger_likelihood': work_charger_likelihood,
+        #     'destination_charger_likelihood': dest_charger_likelihood,
+        #     'midnight_charging_prob': 0,
+        #     "consumption": selected_energy_consumption,
+        #     'home_charger_power': 6.6,
+        #     'work_charger_power': 7.2,
+        #     'destination_charger_power': 100.1,
+        #     "ad_hoc_charger_power": 100.1,
+        #     'max_soc': 1,
+        #     'min_soc': 0.1,
+        #     'min_dwell_event_duration': 0,
+        #     'max_ad_hoc_event_duration': 2,
+        #     'min_ad_hoc_event_duration': 0,
+        #     'payment_penalty': 1,
+        #     'time_penalty': 1,
+        #     'travel_penalty': 1,
+        #     "dwell_charge_time_penalty": 0,
+        #     "ad_hoc_charge_time_penalty": 15,
+        #     'battery_capacity': selected_battery_capacity,
+        #     'residential_rate': residential_rate,
+        #     'commercial_rate': commercial_rate,
+        #     'other_rate': other_rate,
+        #     'home_penalty': 0.0,
+        #     'work_penalty': 0.1,
+        #     'other_penalty': 0.2,
+        #     'ad_hoc_penalty': 1.0,
+        # })
         # Only add default values if they weren't already passed in
         defaults = {
             "tiles": 1,
-            'initial_soc': soc_random,
-            'final_soc': soc_random,
+            'initial_soc': initial_soc,
+            'final_soc': initial_soc,
             'home_charger_likelihood': home_charger_likelihood,
             'work_charger_likelihood': work_charger_likelihood,
             'destination_charger_likelihood': dest_charger_likelihood,
@@ -745,13 +832,13 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
             'destination_charger_power': 100.1,
             "ad_hoc_charger_power": 100.1,
             'max_soc': 1,
-            'min_soc': 0.1,
+            'min_soc': 0.0,
             'min_dwell_event_duration': 0,
             'max_ad_hoc_event_duration': 2,
             'min_ad_hoc_event_duration': 0,
-            'payment_penalty': 1,
-            'time_penalty': 1,
-            'travel_penalty': 1,
+            'payment_penalty': 0.1,
+            'time_penalty': 0.1,
+            'travel_penalty': 0.1,
             "dwell_charge_time_penalty": 0,
             "ad_hoc_charge_time_penalty": 15,
             'battery_capacity': selected_battery_capacity,
@@ -802,7 +889,9 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
 
         # Store them in the tailed_itinerary DataFrame
         tailed_itinerary['Charging_Start_Time'] = problem.solution.get('charging_start_time', np.nan)[:num_trips]
+
         tailed_itinerary['Charging_End_Time'] = problem.solution.get('charging_end_time', np.nan)[:num_trips]
+
         tailed_itinerary['Charging_kwh_distribution'] = problem.solution.get('hour_charging_details', np.nan)[:num_trips]
 
         # Append the tailed itinerary to the results list
@@ -1354,3 +1443,504 @@ def plot_charging_distribution(state, data_dir=None):
     plt.tight_layout()
     plt.show()
 # TEST CHANGE - checking Git tracking
+
+
+def load_full_charging(state, scenario_dirs):
+    """Load and aggregate weekly charging data for each scenario."""
+    all_dfs = []
+    for scenario, path in scenario_dirs.items():
+        file_path = os.path.join(path, f"{state}_itineraries.pkl")
+        if not os.path.exists(file_path):
+            continue
+        with open(file_path, "rb") as f:
+            data = pickle.load(f)
+        df = pd.concat(data.values(), ignore_index=True) if isinstance(data, dict) else data
+        if "Charging_kwh_distribution" not in df.columns:
+            continue
+        df = df.dropna(subset=["Charging_kwh_distribution"])
+        df["Charging_kwh_distribution"] = df["Charging_kwh_distribution"].apply(
+            lambda x: eval(x) if isinstance(x, str) else x
+        )
+        df["Scenario"] = scenario
+        all_dfs.append(df)
+    df = pd.DataFrame(df)
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    cost_summary = combined_df.groupby("Scenario")["Charging_cost"].sum().reset_index()
+    cost_summary.rename(columns={"Charging_cost": "Total_Charging_Cost"}, inplace=True)
+
+    return df, cost_summary
+
+def load_weekly_charging(state, scenario_dirs):
+    """Load and aggregate weekly charging data for each scenario."""
+    weekly_charging_data = []
+    for scenario, path in scenario_dirs.items():
+        file_path = os.path.join(path, f"{state}_itineraries.pkl")
+        if not os.path.exists(file_path):
+            continue
+        with open(file_path, "rb") as f:
+            data = pickle.load(f)
+        df = pd.concat(data.values(), ignore_index=True) if isinstance(data, dict) else data
+        if "Charging_kwh_distribution" not in df.columns:
+            continue
+        df = df.dropna(subset=["Charging_kwh_distribution"])
+        df["Charging_kwh_distribution"] = df["Charging_kwh_distribution"].apply(
+            lambda x: eval(x) if isinstance(x, str) else x
+        )
+        weekly_charging = np.zeros(7 * 24)
+        for _, row in df.iterrows():
+            for (day, hour), charge in row["Charging_kwh_distribution"].items():
+                if 0 <= day <= 6 and 0 <= hour <= 23:
+                    weekly_charging[day * 24 + hour] += charge
+        for i, kwh in enumerate(weekly_charging):
+            weekly_charging_data.append({
+                "Scenario": scenario,
+                "HourOfWeek": i,
+                "Charging_kWh": kwh
+            })
+    return pd.DataFrame(weekly_charging_data)
+
+
+def normalize_weekly_demand(df):
+    """Normalize demand by peak load in each scenario."""
+    summary = df.groupby("Scenario")["Charging_kWh"].agg(['sum', 'idxmax']).reset_index()
+    summary["Peak_Load_kW"] = summary.apply(lambda x: df.loc[x["idxmax"], "Charging_kWh"], axis=1)
+    normalized_df = df.merge(summary[["Scenario", "Peak_Load_kW"]], on="Scenario", how="left")
+    normalized_df["Normalized_Load"] = normalized_df["Charging_kWh"] / normalized_df["Peak_Load_kW"]
+    return normalized_df
+
+
+def calculate_flexibility(df_norm):
+    """Calculate standard deviation and flatness index (coefficient of variation)."""
+    flex_metrics = []
+    for scenario, group in df_norm.groupby("Scenario"):
+        std_dev = group["Normalized_Load"].std()
+        coeff_var = variation(group["Normalized_Load"])
+        flex_metrics.append({
+            "Scenario": scenario,
+            "Normalized StdDev": round(std_dev, 4),
+            "FlatnessIndex": round(coeff_var, 4)
+        })
+    return pd.DataFrame(flex_metrics)
+
+
+def compute_off_peak_share(df_norm, peak_hours=(12, 20)):
+    """Calculate the share of charging that occurs outside peak hours."""
+    def is_peak_hour(hour):
+        hour_in_day = hour % 24
+        return peak_hours[0] <= hour_in_day <= peak_hours[1]
+
+    df_norm["IsPeakHour"] = df_norm["HourOfWeek"].apply(is_peak_hour)
+    off_peak_stats = df_norm.groupby("Scenario").apply(
+        lambda df: 1 - df[df["IsPeakHour"]]["Charging_kWh"].sum() / df["Charging_kWh"].sum()
+    ).reset_index(name="Off-Peak Share")
+    return off_peak_stats
+
+
+
+
+
+def plot_charging_flexibility(flex_df,off_peak_stats, state):
+    """
+    Plot a Charging Flexibility Matrix with Off-Peak Share vs. Flatness Index.
+
+    Parameters:
+        index_df (pd.DataFrame): DataFrame containing 'Scenario', 'Off-Peak Share', 'FlatnessIndex'.
+    """
+    index_df = flex_df.merge(off_peak_stats, on="Scenario")
+    # Use baseline values for normalization
+    baseline_flat = index_df.loc[index_df["Scenario"] == "Baseline scenarios", "FlatnessIndex"].values[0]
+    baseline_offpeak = index_df.loc[index_df["Scenario"] == "Baseline scenarios", "Off-Peak Share"].values[0]
+
+    # Compute deltas
+    index_df["Δ Flatness"] = baseline_flat - index_df["FlatnessIndex"]
+    index_df["Δ Off-Peak"] = -(baseline_offpeak - index_df["Off-Peak Share"])
+    # Calculate midpoints for quadrant lines
+    x_mid = (index_df["Off-Peak Share"].max() + index_df["Off-Peak Share"].min()) / 2
+    y_mid = (index_df["FlatnessIndex"].max() + index_df["FlatnessIndex"].min()) / 2
+
+    # Define group mapping for shape assignment
+    group_shapes = {
+        "Baseline scenarios": "o",
+        # "Optimal Charging": "o",
+        "Incentivized Charging": "s",
+        "Full Home Access": "P",
+        "Full Work Access": "X",
+        "High Access Home & Work": "v",
+        "Public Charger Availability": "*"
+    }
+
+    scenario_to_group = {
+        # "Baseline scenarios": "Baseline scenarios",
+        "Baseline scenarios": "Baseline scenarios",
+        "Incentivized Home Charging (↑Work & Public Price)": "Incentivized Charging",
+        "Incentivized Workplace Charging (↑Home & Public Price)": "Incentivized Charging",
+        "Incentivized Public Charging (↑Home & Work Price)": "Incentivized Charging",
+        "Full Home Access–6.6 kW": "Full Home Access",
+        "Full Home Access–12 kW": "Full Home Access",
+        "Full Home Access–19 kW": "Full Home Access",
+        "Full Work Access–6.6 kW": "Full Work Access",
+        "Full Work Access–12 kW": "Full Work Access",
+        "Full Work Access–19 kW": "Full Work Access",
+        "High Access Home & Work–6.6 kW": "High Access Home & Work",
+        "High Access Home & Work–12 kW": "High Access Home & Work",
+        "High Access Home & Work–19 kW": "High Access Home & Work",
+        "25% Public Charger Availability": "Public Charger Availability",
+        "50% Public Charger Availability": "Public Charger Availability",
+        "75% Public Charger Availability": "Public Charger Availability"
+    }
+
+    # Add group and shape columns
+    index_df["Group"] = index_df["Scenario"].map(scenario_to_group)
+    index_df["Shape"] = index_df["Group"].map(group_shapes)
+
+    # Plot setup
+    plt.figure(figsize=(12, 8))
+    colors = plt.cm.tab20.colors
+
+    # Plot each scenario (excluding baseline to avoid point at origin)
+    for i, row in index_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue
+        plt.scatter(
+            row["Δ Off-Peak"],
+            row["Δ Flatness"],
+            color=colors[i % len(colors)],
+            marker=row["Shape"],
+            s=150,
+            label=row["Scenario"]
+        )
+
+    # Add reference lines at origin
+    plt.axvline(0, color='gray', linestyle='--')
+    plt.axhline(0, color='gray', linestyle='--')
+
+    # Add shaded region (bottom-right = best)
+    min_x, max_x = index_df["Δ Off-Peak"].min(), index_df["Δ Off-Peak"].max()
+    min_y, max_y = index_df["Δ Flatness"].min(), index_df["Δ Flatness"].max()
+
+    plt.gca().add_patch(Rectangle((0, 0), max_x, max_y, color='green', alpha=0.1))  # Better than baseline
+    plt.gca().add_patch(Rectangle((min_x, min_y), -min_x, -min_y, color='red', alpha=0.1))  # Worse
+
+    # Build legend
+    legend_handles = []
+    for i, row in index_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue
+        handle = mlines.Line2D(
+            [], [], color=colors[i % len(colors)],
+            marker=row["Shape"], linestyle='None',
+            markersize=10, label=row["Scenario"]
+        )
+        legend_handles.append(handle)
+
+    plt.legend(
+        handles=legend_handles,
+        title="Scenario",
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.15),
+        ncol=2,
+        fontsize=11,
+        title_fontsize=12,
+        frameon=False
+    )
+
+    # Labels ↓
+    plt.xlabel("Δ Off-Peak Charging Share (↑ = Better)", fontsize=12)
+    plt.ylabel("Δ Flatness Index (↑ = Better)", fontsize=12)
+    plt.title(f"Changes in Charging Pattern Relative to Baseline — {state}", fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.subplots_adjust(bottom=0.25)
+    plt.tight_layout()
+    plt.show()
+
+
+
+def compute_entropy_by_scenario(normalized_df):
+    """
+    Compute entropy over the whole week (168 hours) and per-day (average entropy over 7 days).
+
+    Returns:
+        pd.DataFrame with Scenario, WeeklyEntropy, DailyEntropy
+    """
+    results = []
+    for scenario, group in normalized_df.groupby("Scenario"):
+        # Full week distribution
+        week_dist = group.sort_values("HourOfWeek")["Normalized_Load"].values
+        week_dist = week_dist / week_dist.sum()  # Normalize to probability
+        week_entropy = entropy(week_dist, base=2)
+
+        # Daily entropy: break into 7 days of 24 hours
+        daily_entropies = []
+        for d in range(7):
+            day_slice = group[group["HourOfWeek"].between(d * 24, (d + 1) * 24 - 1)]
+            day_vals = day_slice["Normalized_Load"].values
+            day_vals = day_vals / day_vals.sum() if day_vals.sum() > 0 else np.ones(24) / 24
+            daily_entropies.append(entropy(day_vals, base=2))
+        avg_daily_entropy = np.mean(daily_entropies)
+
+        results.append({
+            "Scenario": scenario,
+            "WeeklyEntropy": round(week_entropy, 5),
+            "DailyEntropy": round(avg_daily_entropy, 5)
+        })
+
+    return pd.DataFrame(results)
+
+
+def plot_entropy_metrics_with_shapes(entropy_df, state):
+    """
+    Scatter plot of Weekly vs. Daily entropy per scenario, using different shapes based on scenario groups.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.lines as mlines
+    from matplotlib.patches import Rectangle
+
+    # Define group mapping for shape assignment
+    group_shapes = {
+        # "Baseline scenarios": "o",
+        "Baseline scenarios": "o",
+        "Incentivized Charging": "s",
+        "Full Home Access": "P",
+        "Full Work Access": "X",
+        "High Access Home & Work": "v",
+        "Public Charger Availability": "*"
+    }
+
+    scenario_to_group = {
+        # "Baseline scenarios": "Baseline scenarios",
+        "Baseline scenarios": "Baseline scenarios",
+        "Incentivized Home Charging (↑Work & Public Price)": "Incentivized Charging",
+        "Incentivized Workplace Charging (↑Home & Public Price)": "Incentivized Charging",
+        "Incentivized Public Charging (↑Home & Work Price)": "Incentivized Charging",
+        "Full Home Access–6.6 kW": "Full Home Access",
+        "Full Home Access–12 kW": "Full Home Access",
+        "Full Home Access–19 kW": "Full Home Access",
+        "Full Work Access–6.6 kW": "Full Work Access",
+        "Full Work Access–12 kW": "Full Work Access",
+        "Full Work Access–19 kW": "Full Work Access",
+        "High Access Home & Work–6.6 kW": "High Access Home & Work",
+        "High Access Home & Work–12 kW": "High Access Home & Work",
+        "High Access Home & Work–19 kW": "High Access Home & Work",
+        "25% Public Charger Availability": "Public Charger Availability",
+        "50% Public Charger Availability": "Public Charger Availability",
+        "75% Public Charger Availability": "Public Charger Availability"
+    }
+
+    # Add group/shape
+    entropy_df["Group"] = entropy_df["Scenario"].map(scenario_to_group)
+    entropy_df["Shape"] = entropy_df["Group"].map(group_shapes)
+
+    # Get baseline values
+    baseline_weekly = entropy_df.loc[entropy_df["Scenario"] == "Baseline scenarios", "WeeklyEntropy"].values[0]
+    baseline_daily = entropy_df.loc[entropy_df["Scenario"] == "Baseline scenarios", "DailyEntropy"].values[0]
+
+    # Compute delta from baseline
+    entropy_df["Δ Weekly Entropy"] = -(baseline_weekly - entropy_df["WeeklyEntropy"])
+    entropy_df["Δ Daily Entropy"] = - (baseline_daily - entropy_df["DailyEntropy"])
+
+    # Plot
+    plt.figure(figsize=(12, 7))
+    colors = plt.cm.tab20.colors
+
+    for i, row in entropy_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue  # skip plotting at (0, 0)
+        plt.scatter(
+            row["Δ Weekly Entropy"],
+            row["Δ Daily Entropy"],
+            color=colors[i % len(colors)],
+            marker=row["Shape"],
+            s=130,
+            label=row["Scenario"]
+        )
+
+    # Axes lines
+    plt.axvline(0, color='gray', linestyle='--')
+    plt.axhline(0, color='gray', linestyle='--')
+
+    # Bottom-right shaded = lower entropy = more predictable/peaky
+    min_x, max_x = entropy_df["Δ Weekly Entropy"].min(), entropy_df["Δ Weekly Entropy"].max()
+    min_y, max_y = entropy_df["Δ Daily Entropy"].min(), entropy_df["Δ Daily Entropy"].max()
+
+    plt.gca().add_patch(Rectangle((0, 0), max_x, max_y, color='green', alpha=0.1))  # Better than baseline
+    plt.gca().add_patch(Rectangle((min_x, min_y), -min_x, -min_y, color='red', alpha=0.1))  # Worse
+
+    # Legend
+    legend_handles = []
+    for i, row in entropy_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue
+        handle = mlines.Line2D(
+            [], [], color=colors[i % len(colors)],
+            marker=row["Shape"], linestyle='None',
+            markersize=10, label=row["Scenario"]
+        )
+        legend_handles.append(handle)
+
+    plt.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1, 0.5),
+               fontsize=10, frameon=False, title="Scenario", title_fontsize=11)
+
+    # Labels
+    plt.xlabel("Δ Weekly Entropy (↓ = More Peaky, ↑ = More Flat)", fontsize=12)
+    plt.ylabel("Δ Daily Entropy (↓ = More Peaky, ↑ = More Flat)", fontsize=12)
+    plt.title(f"Temporal Spread of Charging Compared to Baseline — {state}", fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+    plt.show()
+
+def compute_alignment_scores(normalized_df, solar_profile, wind_profile):
+    """
+    Compute alignment scores between normalized load and solar/wind generation profiles.
+
+    Parameters:
+        normalized_df (pd.DataFrame): Must include ["Scenario", "HourOfWeek", "Normalized_Load"]
+        solar_profile (array-like): Normalized 24-hour solar generation profile
+        wind_profile (array-like): Normalized 24-hour wind generation profile
+
+    Returns:
+        pd.DataFrame with ["Scenario", "SolarAlignment", "WindAlignment"]
+    """
+    alignment_scores = []
+
+    for scenario, group in normalized_df.groupby("Scenario"):
+        weekly_load = group.sort_values("HourOfWeek")["Normalized_Load"].values.reshape((7, 24))
+        avg_daily_load = weekly_load.mean(axis=0)
+
+        solar_score = np.dot(avg_daily_load, solar_profile)
+        wind_score = np.dot(avg_daily_load, wind_profile)
+
+        alignment_scores.append({
+            "Scenario": scenario,
+            "SolarAlignment": round(solar_score, 4),
+            "WindAlignment": round(wind_score, 4)
+        })
+
+    return pd.DataFrame(alignment_scores)
+
+def plot_alignment_scores(alignment_df, state):
+    group_shapes = {
+        "Baseline scenarios": "o",
+        # "Optimal Charging": "o",
+        "Incentivized Charging": "s",
+        "Full Home Access": "P",
+        "Full Work Access": "X",
+        "High Access Home & Work": "v",
+        "Public Charger Availability": "*"
+    }
+
+    scenario_to_group = {
+        # "Baseline scenarios": "Baseline scenarios",
+        "Baseline scenarios": "Baseline scenarios",
+        "Incentivized Home Charging (↑Work & Public Price)": "Incentivized Charging",
+        "Incentivized Workplace Charging (↑Home & Public Price)": "Incentivized Charging",
+        "Incentivized Public Charging (↑Home & Work Price)": "Incentivized Charging",
+        "Full Home Access–6.6 kW": "Full Home Access",
+        "Full Home Access–12 kW": "Full Home Access",
+        "Full Home Access–19 kW": "Full Home Access",
+        "Full Work Access–6.6 kW": "Full Work Access",
+        "Full Work Access–12 kW": "Full Work Access",
+        "Full Work Access–19 kW": "Full Work Access",
+        "High Access Home & Work–6.6 kW": "High Access Home & Work",
+        "High Access Home & Work–12 kW": "High Access Home & Work",
+        "High Access Home & Work–19 kW": "High Access Home & Work",
+        "25% Public Charger Availability": "Public Charger Availability",
+        "50% Public Charger Availability": "Public Charger Availability",
+        "75% Public Charger Availability": "Public Charger Availability"
+    }
+
+    alignment_df["Group"] = alignment_df["Scenario"].map(scenario_to_group)
+    alignment_df["Shape"] = alignment_df["Group"].map(group_shapes)
+
+    # Get baseline alignment values
+    baseline = alignment_df[alignment_df["Scenario"] == "Baseline scenarios"].iloc[0]
+    solar_baseline = baseline["SolarAlignment"]
+    wind_baseline = baseline["WindAlignment"]
+
+    # Compute deltas
+    alignment_df["Δ Solar"] = -(solar_baseline - alignment_df["SolarAlignment"])
+    alignment_df["Δ Wind"] = -(wind_baseline - alignment_df["WindAlignment"])
+
+    # Plot
+    plt.figure(figsize=(12, 7))
+    colors = plt.cm.tab20.colors
+
+    for i, row in alignment_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue  # skip (0,0) baseline dot
+        plt.scatter(
+            row["Δ Solar"],
+            row["Δ Wind"],
+            color=colors[i % len(colors)],
+            marker=row["Shape"],
+            s=130,
+            label=row["Scenario"]
+        )
+
+    # Quadrant lines
+    plt.axvline(0, color='gray', linestyle='--')
+    plt.axhline(0, color='gray', linestyle='--')
+
+    # Shading: top-right = best alignment
+    min_x, max_x = alignment_df["Δ Solar"].min(), alignment_df["Δ Solar"].max()
+    min_y, max_y = alignment_df["Δ Wind"].min(), alignment_df["Δ Wind"].max()
+
+    plt.gca().add_patch(Rectangle((0, 0), max_x, max_y, color='green', alpha=0.1))  # Better than baseline
+    plt.gca().add_patch(Rectangle((min_x, min_y), -min_x, -min_y, color='red', alpha=0.1))  # Worse
+
+    # Custom legend
+    legend_handles = []
+    for i, row in alignment_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue
+        handle = mlines.Line2D([], [], color=colors[i % len(colors)],
+                               marker=row["Shape"], linestyle='None',
+                               markersize=10, label=row["Scenario"])
+        legend_handles.append(handle)
+
+    plt.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1, 0.5),
+               fontsize=10, frameon=False, title="Scenario", title_fontsize=11)
+
+    # Labels and layout
+    plt.xlabel("Δ Solar Alignment Score (↑ = Better Alignment)", fontsize=12)
+    plt.ylabel("Δ Wind Alignment Score (↑ = Better Alignment)", fontsize=12)
+    plt.title(f"Alignment of Charging with Renewable Generation — {state}", fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage (use real solar/wind profiles for actual results)
+solar_profile = np.array([0, 0, 0, 0, 0, 0.05, 0.2, 0.5, 0.75, 1.0, 0.9, 0.7,
+                          0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0, 0, 0, 0, 0, 0])
+solar_profile /= solar_profile.sum()
+
+wind_profile = np.array([0.4, 0.5, 0.6, 0.7, 0.8, 0.75, 0.6, 0.5, 0.4, 0.3, 0.25, 0.2,
+                         0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 0.9, 0.95, 1.0, 0.8, 0.6])
+wind_profile /= wind_profile.sum()
+
+
+def plot_relative_to_baseline(index_df, state):
+    plt.figure(figsize=(10, 7))
+    colors = plt.cm.tab20.colors
+
+    for i, row in index_df.iterrows():
+        if row["Scenario"] == "Baseline scenarios":
+            continue  # Don't plot baseline against itself
+        plt.scatter(
+            row["Δ Off-Peak"],
+            row["Δ Flatness"],
+            color=colors[i % len(colors)],
+            label=row["Scenario"],
+            s=100
+        )
+
+    # Reference lines at (0, 0)
+    plt.axhline(0, color="gray", linestyle="--", linewidth=1)
+    plt.axvline(0, color="gray", linestyle="--", linewidth=1)
+
+    plt.title(f"Change in Charging Metrics Relative to Baseline — {state}", fontsize=14)
+    plt.xlabel("Δ Off-Peak Charging Share (↑ means better)", fontsize=12)
+    plt.ylabel("Δ Flatness Index (↓ means flatter)", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()

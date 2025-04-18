@@ -221,18 +221,19 @@ class EVCSP_delay():
     def Solve(self, solver_kwargs={}):
         solver = pyomo.SolverFactory(**solver_kwargs)
         # Add MIP gap for groubi (set to 5%)
-        solver.options['MIPGap'] = 0.35  # 35% MIP gap
+        solver.options['MIPGap'] = 0.15  # 35% MIP gap
         solver.options['Threads'] = 24
         solver.options['Presolve'] = 2
         solver.options['Heuristics'] = 0.5  # Enable solver's internal heuristic
         solver.options["OutputFlag"] = 0
-        solver.options["MIPFocus"] = 1  # Focus on finding feasible solutions faster
-        solver.options["Method"] = 1  # Barrier method for faster relaxation
+        # solver.options["MIPFocus"] = 1  # Focus on finding feasible solutions faster
+        # solver.options["Method"] = 2  # Barrier method for faster relaxation
         # solver.options["NodeMethod"] = 2  # Parallelized branch-and-bound
-        solver.options['Cuts'] = 1  # or 3
+        # solver.options['Cuts'] = 3 # or 3
         # solver.options["LazyConstraints"] = 1  # Enable lazy constraints (can speed up MIP)
+
         # Write the LP file for debugging
-        # self.model.write("model.lp", io_options={"symbolic_solver_labels": True})
+        self.model.write("model.lp", io_options={"symbolic_solver_labels": True})
         res = solver.solve(self.model, tee=False)
         self.solver_status = res.solver.status
         self.solver_termination_condition = res.solver.termination_condition
@@ -255,7 +256,8 @@ class EVCSP_delay():
         # Upper-level objective (inconvenience)
         self.UpperObjective()  # New
         # Lower-level KKT conditions for cost minimization
-        self.LowerKKT_new()
+        self.LowerKKT()
+        # self.LowerKKT_new()
         # Bounds constraints
         self.Bounds()
         # Unit commitment constraints
@@ -310,7 +312,145 @@ class EVCSP_delay():
 
         self.model.objective.expr += sum(100 * 1e9 * self.model.x_a_nec[e] for e in self.model.E)
 
+    def LowerKKT(self):
+        model = self.model
+
+        # 1) Dual Variables for Charging Decisions
+        model.lambda_d_min = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+        model.lambda_d_max = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+        model.lambda_a_min = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+        model.lambda_a_max = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+
+        # 2) Dual Variables for Duration Constraints
+        model.mu_tau_min = pyomo.Var(model.E, domain=pyomo.NonNegativeReals)
+        model.mu_tau_max = pyomo.Var(model.E, domain=pyomo.NonNegativeReals)
+        model.mu_tdu_min = pyomo.Var(model.E, domain=pyomo.NonNegativeReals)
+        model.mu_tdu_max = pyomo.Var(model.E, domain=pyomo.NonNegativeReals)
+
+        # 3) Auxiliary Variables for Linearization
+        model.z_d = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+        model.z_a = pyomo.Var(model.EM, domain=pyomo.NonNegativeReals)
+
+        # 4) Stationarity Conditions for Destination Charging (x_d)
+        def stationarity_xd_rule(m, e, h):
+            """ Ensure correct stationarity for destination charging (x_d) """
+            hour_index = max(0, min(h, 8759))
+
+            # Select rate per hour
+            cost_rate_home = self.inputs['residential_rate'][hour_index] if isinstance(self.inputs['residential_rate'], list) else self.inputs['residential_rate']
+            cost_rate_work = self.inputs['commercial_rate'][hour_index] if isinstance(self.inputs['commercial_rate'], list) else self.inputs['commercial_rate']
+            cost_rate_other = self.inputs['other_rate'][hour_index] if isinstance(self.inputs['other_rate'], list) else self.inputs['other_rate']
+
+            # Compute cost rate for each event and hour
+            cost_rate = (
+                    cost_rate_home * self.inputs['is_home'][e] +
+                    cost_rate_work * self.inputs['is_work'][e] +
+                    cost_rate_other * self.inputs['is_other'][e]
+            )
+
+            # Stationarity condition for x_d
+            return cost_rate - m.lambda_d_min[e, h] + m.lambda_d_max[e, h] == 0
+
+        model.stationarity_xd = pyomo.Constraint(model.EM, rule=stationarity_xd_rule)
+
+        # 5) Stationarity Conditions for Ad-Hoc Charging (x_a)
+        def stationarity_xa_rule(m, e, h):
+            cost_rate = self.inputs['other_rate']
+            return cost_rate - m.lambda_a_min[e, h] + m.lambda_a_max[e, h] == 0
+
+        model.stationarity_xa = pyomo.Constraint(model.EM, rule=stationarity_xa_rule)
+
+        # 6) Primal Feasibility for Charging Speed Constraints
+        def xd_min_rule(m, e, h):
+            return m.x_d[e, h] >= 0
+
+        def xd_max_rule(m, e, h):
+            max_power = (
+                self.inputs['r_d_h'] if self.inputs['is_home'][e] else
+                self.inputs['r_d_w'] if self.inputs['is_work'][e] else
+                self.inputs['r_d_o'] if self.inputs['is_other'][e] else 0
+            )
+            return m.x_d[e, h] <= max_power * m.z_d[e, h]
+
+        model.xd_min_con = pyomo.Constraint(model.EM, rule=xd_min_rule)
+        model.xd_max_con = pyomo.Constraint(model.EM, rule=xd_max_rule)
+
+        def xa_min_rule(m, e, h):
+            return m.x_a[e, h] >= 0
+
+        def xa_max_rule(m, e, h):
+            return m.x_a[e, h] <= self.inputs['r_a'] * m.z_a[e, h]
+
+        model.xa_min_con = pyomo.Constraint(model.EM, rule=xa_min_rule)
+        model.xa_max_con = pyomo.Constraint(model.EM, rule=xa_max_rule)
+
+        # 7) Link Auxiliary Variables to Binary Decisions
+        M = 1e9
+
+        def link_zd_rule_1(m, e, h):
+            """ Link z_d to binary decision u_db with Big-M """
+            return m.x_d[e, h] <= M * m.u_db[e]
+
+        def link_zd_rule_2(m, e, h):
+            """ Enforce z_d to be 0 if u_db is 0 """
+            return m.z_d[e, h] <= m.u_db[e]
+
+        def link_za_rule_1(m, e, h):
+            """ Link z_a to binary decision u_ab with Big-M """
+            return m.x_a[e, h] <= M * m.u_ab[e]
+
+        def link_za_rule_2(m, e, h):
+            """ Enforce z_a to be 0 if u_ab is 0 """
+            return m.z_a[e, h] <= m.u_ab[e]
+        #
+        model.link_zd_con_1 = pyomo.Constraint(model.EM, rule=link_zd_rule_1)
+        model.link_zd_con_2 = pyomo.Constraint(model.EM, rule=link_zd_rule_2)
+        model.link_za_con_1 = pyomo.Constraint(model.EM, rule=link_za_rule_1)
+        model.link_za_con_2 = pyomo.Constraint(model.EM, rule=link_za_rule_2)
+
+        # 8) Primal Feasibility for Duration Constraints
+        def tdu_min_rule(m, e):
+            return m.tdu_e[e] >= 0
+
+        def tdu_max_rule(m, e):
+            return m.tdu_e[e] <= self.inputs['d_e_max'][e]
+
+        model.tdu_min_con = pyomo.Constraint(model.E, rule=tdu_min_rule)
+        model.tdu_max_con = pyomo.Constraint(model.E, rule=tdu_max_rule)
+
+        def tau_min_rule(m, e):
+            return m.tau_e[e] >= 0
+
+        def tau_max_rule(m, e):
+            return m.tau_e[e] <= self.inputs['a_e_max'][e]
+
+        model.tau_min_con = pyomo.Constraint(model.E, rule=tau_min_rule)
+        model.tau_max_con = pyomo.Constraint(model.E, rule=tau_max_rule)
+
+        # 9) Big-M Linearization for Complementary Slackness
+        M = 150  #Big-M value (large positive number)
+
+        def compl_slack_tdu_min_rule(m, e):
+            return m.mu_tdu_min[e] <= M * (1 - m.u_db[e])
+
+        def compl_slack_tdu_max_rule(m, e):
+            return m.mu_tdu_max[e] <= M * m.u_db[e]
+
+        model.compl_slack_tdu_min = pyomo.Constraint(model.E, rule=compl_slack_tdu_min_rule)
+        model.compl_slack_tdu_max = pyomo.Constraint(model.E, rule=compl_slack_tdu_max_rule)
+
+        def compl_slack_tau_min_rule(m, e):
+            return m.mu_tau_min[e] <= M * (1 - m.u_ab[e])
+
+        def compl_slack_tau_max_rule(m, e):
+            return m.mu_tau_max[e] <= M * m.u_ab[e]
+
+        model.compl_slack_tau_min = pyomo.Constraint(model.E, rule=compl_slack_tau_min_rule)
+        model.compl_slack_tau_max = pyomo.Constraint(model.E, rule=compl_slack_tau_max_rule)
+
     def LowerKKT_new(self):
+
+
         model = self.model
         E = model.E  # set of events
         EM = model.EM  # set of (e,h) pairs where charging is allowed
@@ -360,6 +500,10 @@ class EVCSP_delay():
         # We'll keep them as normal constraints so that x_d doesn't become negative, etc.
 
         def xd_max_rule(m, e, h):
+            # r_dest = (self.inputs['r_d_h'] if self.inputs['is_home'][e]
+            #           else self.inputs['r_d_w'] if self.inputs['is_work'][e]
+            #           else self.inputs['r_d_o'] if self.inputs['is_other'][e]
+            #           else 0)
             r_dest = self.inputs['r_d'][e]  # event-specific destination charging power
             return m.x_d[e, h] <= r_dest * self.model.u_db[e]
 
@@ -367,6 +511,10 @@ class EVCSP_delay():
 
         # sum_h x_d[e,h] <= tdu_e[e]* r_dest
         def sum_xd_rule(m, e):
+            # r_dest = (self.inputs['r_d_h'] if self.inputs['is_home'][e]
+            #           else self.inputs['r_d_w'] if self.inputs['is_work'][e]
+            #           else self.inputs['r_d_o'] if self.inputs['is_other'][e]
+            #           else 0)
             r_dest = self.inputs['r_d'][e]  # event-specific destination charging power
             return m.tdu_e[e] * r_dest - sum(m.x_d[e, h] for h in self.inputs['valid_hours'][e]) >= 0
         model.sum_xd_con = pyomo.Constraint(E, rule=sum_xd_rule)
@@ -552,7 +700,7 @@ class EVCSP_delay():
                 return model.x_d[e, h] == 0
             return pyomo.Constraint.Skip
 
-        # model.no_charge_outside_window_d = pyomo.Constraint(model.EM, rule=charging_within_window_rule_d)
+        model.no_charge_outside_window_d = pyomo.Constraint(model.EM, rule=charging_within_window_rule_d)
 
         def charging_within_window_rule_a(model, e, h):
             """Ad-Hoc charging (x_a) must only happen within valid hours."""
@@ -590,7 +738,7 @@ class EVCSP_delay():
                 for h in self.inputs['valid_hours'][e]
             ) <= model.tdu_e[e]
 
-        # model.destination_duration_limit = pyomo.Constraint(model.E, rule=destination_duration_limit)
+        model.destination_duration_limit = pyomo.Constraint(model.E, rule=destination_duration_limit)
 
         def ad_hoc_charging_duration_rule(model, e):
             """Ensure ad-hoc charging duration matches unit commitment decision."""
