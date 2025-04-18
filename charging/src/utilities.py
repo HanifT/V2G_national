@@ -676,11 +676,12 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
                           65,  # Nissan Leaf 0.026
                           75]  # Rest 30%
     probabilities = [0.256, 0.176, 0.059, 0.052, 0.038, 0.031, 0.026, 0.0233, 0.019, 0.017, 0.3027]
-    rng = np.random.default_rng(seed=123)
+    battery_seed = 123
+    battery_rng = np.random.default_rng(battery_seed)
 
     # Define a function to select a battery capacity based on the given probabilities
     def get_random_battery_capacity(battery_capacities, probabilities):
-        return rng.choice(battery_capacities, p=probabilities)
+        return battery_rng.choice(battery_capacities, p=probabilities)
 
     state = itineraries[0]["trips"]["HHSTATE"].iloc[0]
 
@@ -697,20 +698,14 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
     commercial_rate_dict = rates.get("Commercial", {}).get("rate", {})
 
     # Convert to float and ensure all hours are covered
-    residential_rate = [
-        float(residential_rate_dict.get(str(hour), 0.0)) / r if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0
-        for hour in range(8760)
-    ]
-
-    commercial_rate = [
-        float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0
-        for hour in range(8760)
-    ]
+    residential_rate = [float(residential_rate_dict.get(str(hour), 0.0)) / r if isinstance(residential_rate_dict.get(str(hour)), (int, float, str)) else 0.0 for hour in range(8760)]
+    commercial_rate = [float(commercial_rate_dict.get(str(hour), 0.0)) / c if isinstance(commercial_rate_dict.get(str(hour)), (int, float, str)) else 0.0 for hour in range(8760)]
     other_rate = 0.5 / o  # Fixed rate for "other"
 
     processor = ChargerDataProcessor()
     public_charger_df = processor.compute_public_charger_rate()[["State", "charger_station_dc_ratio", "charger_station_l_ratio"]]
     home_charger_df = get_charger_likelihood_by_state(year=2022)
+
     try:
         home_charger_likelihood = home_charger_df.loc[home_charger_df["NAME"] == state_full_name, "charger_likelihood"].values[0]
         dest_charger_likelihood = public_charger_df.loc[public_charger_df["State"] == state_full_name, "charger_station_dc_ratio"].values[0]
@@ -728,13 +723,18 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
         # Select a battery capacity based on the defined distribution
         selected_battery_capacity = get_random_battery_capacity(battery_capacities, probabilities)
         selected_energy_consumption = itinerary["trips"]["Energy_Consumption"].mean() / 1609  # kWh/meter # * 2236.94 # kWh/mile to joule/meter
+        rng = np.random.default_rng(seed=123)
+        first_trip_energy = itinerary["trips"]['TRPMILES'].iloc[0] * 1609.34 * selected_energy_consumption
+        min_required_soc = first_trip_energy / selected_battery_capacity
         soc_random = rng.uniform(0.3, 1)
+        buffer = 0.1
+        initial_soc = max(soc_random, min_required_soc + buffer)  # e.g., buffer = 0.05
 
         # Only add default values if they weren't already passed in
         defaults = {
             "tiles": 1,
-            'initial_soc': soc_random,
-            'final_soc': soc_random,
+            'initial_soc': initial_soc,
+            'final_soc': initial_soc,
             'home_charger_likelihood': home_charger_likelihood,
             'work_charger_likelihood': work_charger_likelihood,
             'destination_charger_likelihood': dest_charger_likelihood,
@@ -805,8 +805,8 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
         tailed_itinerary['Charging_End_Time'] = problem.solution.get('charging_end_time', np.nan)[:num_trips]
         tailed_itinerary['Charging_kwh_distribution'] = problem.solution.get('hour_charging_details', np.nan)[:num_trips]
 
-        # Append the tailed itinerary to the results list
-        all_tailed_itineraries.append(tailed_itinerary)
+        # # Append the tailed itinerary to the results list
+        # all_tailed_itineraries.append(tailed_itinerary)
 
         # Initialize the new columns with NaN
         tailed_itinerary['SOC_charging_start'] = np.nan
@@ -829,6 +829,9 @@ def generate_itineraries(states="CA", electricity_price_file="electricity_prices
 
         tailed_itinerary.loc[mask_charging, 'SOC_Trip_end'] = \
             tailed_itinerary.loc[mask_charging, 'SOC_Trip_end']
+
+        # Append the tailed itinerary to the results list
+        all_tailed_itineraries.append(tailed_itinerary)
 
         # Concatenate all the individual DataFrames into one final DataFrame
     final_df = pd.concat(all_tailed_itineraries, ignore_index=True)

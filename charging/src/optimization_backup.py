@@ -228,7 +228,7 @@ class EVCSP_delay():
         solver.options["OutputFlag"] = 0
         solver.options["MIPFocus"] = 1  # Focus on finding feasible solutions faster
         solver.options["Method"] = 1  # Barrier method for faster relaxation
-        # solver.options["NodeMethod"] = 2  # Parallelized branch-and-bound
+        solver.options["NodeMethod"] = 2  # Parallelized branch-and-bound
         solver.options['Cuts'] = 1  # or 3
         # solver.options["LazyConstraints"] = 1  # Enable lazy constraints (can speed up MIP)
         # Write the LP file for debugging
